@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  app:
+    image: emerchan2025/pat:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    ports:
+      - "7400:3000"
+    volumes:
+      # CAMINHO ESPECÍFICO PARA UPLOADS (ZimaOS)
+      - /media/ZimaOS-HD/gestao-database/investy:/app/public/uploads
+    environment:
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_USER=root
+      - DB_PASSWORD=sua_senha_segura_aqui
+      - DB_NAME=sispatrimonio
+      - JWT_SECRET=seu_segredo_jwt_muito_seguro_aqui
+      # IMPORTANTE: Ajuste esta URL para o IP ou Domínio da sua VPS
+      - NEXT_PUBLIC_API_URL=http://SEU_IP_OU_DOMINIO:7400/api
+    networks:
+      - sispatrimonio-swarm-net
+    depends_on:
+      - db
+
+  db:
+    image: mariadb:10.6
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      MYSQL_ROOT_PASSWORD: sua_senha_segura_aqui
+      MYSQL_DATABASE: sispatrimonio
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - sispatrimonio-swarm-net
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-psua_senha_segura_aqui"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      PMA_HOST: db
+      PMA_PORT: 3306
+      PMA_ARBITRARY: 1
+    ports:
+      - "8081:80"
+    networks:
+      - sispatrimonio-swarm-net
+
+volumes:
+  db_data:
+
+networks:
+  sispatrimonio-swarm-net:
+    driver: overlay
+    attachable: true

@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: sispatrimonio-app
+    restart: always
+    ports:
+      - "7400:3000"
+    volumes:
+      - ./uploads:/app/public/uploads
+    environment:
+      - DB_HOST=db
+      - DB_USER=root
+      - DB_PASSWORD=root
+      - DB_NAME=sispatrimonio
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=http://localhost:7400/api
+    depends_on:
+      - db
+
+  db:
+    image: mysql:8.0
+    container_name: sispatrimonio-db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: sispatrimonio
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./scripts/sispatrimonio_completo_v2.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "3307:3306"
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: sispatrimonio-pma
+    restart: always
+    links:
+      - db
+    environment:
+      PMA_HOST: db
+      PMA_PORT: 3306
+      PMA_ARBITRARY: 1
+    ports:
+      - "8081:80"
+    depends_on:
+      - db
+
+volumes:
+  db_data:
