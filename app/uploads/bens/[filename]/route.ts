@@ -1,6 +1,7 @@
 import fs from "fs"
 import path from "path"
 import { NextResponse } from "next/server"
+import { isSafeFilenameSegment } from "@/lib/route-security"
 
 export async function GET(
   request: Request,
@@ -8,6 +9,10 @@ export async function GET(
 ) {
   try {
     const { filename } = await params
+    if (!isSafeFilenameSegment(filename)) {
+      return new NextResponse("Invalid file name", { status: 400 })
+    }
+
     const filePath = path.join(process.cwd(), "public", "uploads", "bens", filename)
 
     if (!fs.existsSync(filePath)) {

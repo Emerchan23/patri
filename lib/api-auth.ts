@@ -1,15 +1,15 @@
 import { NextResponse } from "next/server"
-import { getAuthUserFromRequest, type DbUser } from "./auth-utils"
+import { getAuthUserFromRequest, type ScopedDbUser } from "./auth-utils"
 import type { Permissions, UserRole } from "./auth"
-import { rolePermissions } from "./auth"
+import { getPermissions } from "./auth"
 
 export type AuthenticatedRequest = Request & {
-  user: DbUser & { secretariasGerenciadas?: string[] }
+  user: ScopedDbUser
 }
 
 type ApiHandler = (
   request: Request,
-  context: { user: DbUser & { secretariasGerenciadas?: string[] }; params?: Record<string, string> }
+  context: { user: ScopedDbUser; params?: Record<string, string> }
 ) => Promise<NextResponse>
 
 export function withAuth(handler: ApiHandler) {
@@ -33,7 +33,7 @@ export function withAuth(handler: ApiHandler) {
 export function withPermission(permission: keyof Permissions, handler: ApiHandler) {
   return withAuth(async (request, context) => {
     const userRole = context.user.role as UserRole
-    const perms = rolePermissions[userRole]
+    const perms = context.user.permissions || getPermissions(userRole, context.user.permissionOverrides)
 
     if (!perms[permission]) {
       return NextResponse.json({ error: "Sem permissao para esta acao" }, { status: 403 })

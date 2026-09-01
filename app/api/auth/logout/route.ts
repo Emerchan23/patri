@@ -1,9 +1,16 @@
 import { NextResponse } from "next/server"
-import { clearAuthCookie, getAuthUserFromRequest } from "@/lib/auth-utils"
+import { clearAuthCookie, getAuthUserFromRequest, getTokenFromRequest, verifyToken } from "@/lib/auth-utils"
 import { registrarLog } from "@/lib/audit"
+import { blacklistToken } from "@/lib/redis-tools"
 
 export async function POST(request: Request) {
   try {
+    const token = getTokenFromRequest(request)
+    if (token) {
+      const payload = verifyToken(token)
+      await blacklistToken({ token, payload })
+    }
+
     const user = await getAuthUserFromRequest(request)
 
     if (user) {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { query } from "@/lib/db"
 import { verifyAuth } from "@/lib/api-auth"
+import { appendScopeClause, getAssetScopeClause } from "@/lib/asset-scope"
 
 export const dynamic = 'force-dynamic'
 
@@ -14,7 +15,11 @@ export async function GET(req: NextRequest) {
   console.log("Usuario autenticado:", user.nome)
 
   try {
-    const rows = await query("SELECT * FROM bens WHERE categoria_slug LIKE 'veicul%' ORDER BY modelo ASC")
+    const scoped = appendScopeClause("WHERE 1=1", [], getAssetScopeClause(user))
+    const rows = await query(
+      `SELECT * FROM bens ${scoped.whereClause} AND categoria_slug LIKE 'veicul%' ORDER BY modelo ASC`,
+      scoped.params
+    )
     console.log(`Encontrados ${Array.isArray(rows) ? rows.length : 0} veiculos`)
     
     // Convert DB rows to Asset format expected by frontend
@@ -76,4 +81,3 @@ export async function GET(req: NextRequest) {
 
 // POST endpoint removed as vehicle registration should be done via /api/bens (Cadastrar Bem)
 // to ensure consistency with the main assets table.
-

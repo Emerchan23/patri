@@ -62,6 +62,13 @@ export interface Loan {
   motivo?: string
   observacoes?: string
   status: LoanStatus
+  termo?: {
+    id: string
+    status: "gerado" | "assinado"
+    geradoEm?: string
+    assinadoEm?: string
+    arquivoAssinado?: string | null
+  } | null
 }
 
 export interface Asset {
@@ -97,6 +104,7 @@ export interface Asset {
   marca?: string
   modelo?: string
   fornecedor?: string
+  tipoEntrada?: string
   numeroSerie?: string
   numero_serie?: string
   estadoConservacao?: string
@@ -107,6 +115,12 @@ export interface Asset {
   ano?: number
   kmAtual?: number
   km_atual?: number
+  emendaParlamentar?: string
+  etiquetaStatus?: "pendente" | "enviada" | "colada" | null
+  etiquetaEnviadaEm?: string
+  etiquetaEnviadaPor?: string
+  etiquetaColadaEm?: string
+  etiquetaColadaPor?: string
 }
 
 export interface Movement {
@@ -314,6 +328,24 @@ export function getCategoryLabel(cat: AssetCategory, categories?: Category[]): s
     veiculo: "Veiculo",
   }
   return defaults[cat] || cat || "Sem categoria"
+}
+
+export function getEtiquetaStatusLabel(status?: string | null): string {
+  const labels: Record<string, string> = {
+    pendente: "Fluxo antigo para revisar",
+    enviada: "Aguardando colagem",
+    colada: "Etiqueta Colada Confirmada",
+  }
+  return status ? labels[status] || status : ""
+}
+
+export function getEtiquetaStatusColor(status?: string | null): string {
+  const colors: Record<string, string> = {
+    pendente: "border-warning/40 bg-warning/10 text-warning",
+    enviada: "border-info/40 bg-info/10 text-info",
+    colada: "border-success/40 bg-success/10 text-success",
+  }
+  return status ? colors[status] || "border-muted bg-muted text-muted-foreground" : ""
 }
 
 export function getLoanStatusLabel(status: LoanStatus | string): string {

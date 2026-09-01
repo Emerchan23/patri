@@ -18,7 +18,8 @@ import {
   getStatusColor,
   getStatusLabel,
   getCategoryLabel,
-  formatDate,
+  getEtiquetaStatusColor,
+  getEtiquetaStatusLabel,
 } from "@/lib/data"
 import { useAuth } from "@/lib/auth-context"
 import useSWR from "swr"
@@ -33,8 +34,12 @@ export function DashboardAssistente() {
 
   // Fetch assets for this user's unit
   const assetsQuery = new URLSearchParams()
+  const assistantDepartments = user?.unidade?.departamentos?.length
+    ? user.unidade.departamentos
+    : user?.unidade?.departamento
+      ? [user.unidade.departamento]
+      : []
   if (user?.unidade?.secretaria) assetsQuery.set("secretaria", user.unidade.secretaria)
-  if (user?.unidade?.departamento) assetsQuery.set("departamento", user.unidade.departamento)
   
   // Only fetch if we have unit info
   const shouldFetch = !!user?.unidade?.secretaria
@@ -53,41 +58,14 @@ export function DashboardAssistente() {
     emManutencao: unitAssets.filter((a) => a.status === "em_manutencao").length,
   }
 
-  // Filter for pending labels
-  // Logic: Assets that have definitive patrimony but are marked as "pending label" (via observation hack or status)
-  // OR assets that are provisional. The original code showed provisional.
-  // We'll keep showing provisional ones, assuming the workflow is:
-  // 1. Assistant registers provisional -> Appears here
-  // 2. Manager assigns definitive -> Assistant sees definitive number -> Prints/Sticks label -> Confirms
-  // But if it's definitive, it's not provisional anymore.
-  // Let's assume the list shows "Provisorios" as "Pending Label" effectively.
-  // And we'll filter out those with "[Etiqueta Colada]" in observations as a workaround.
-  const pendentesEtiqueta = unitAssets.filter((a) => 
-    (a.patrimonioTipo === "provisorio" || a.patrimonioTipo === "definitivo") && 
-    !a.observacoes?.includes("[Etiqueta Colada]") &&
-    // Show only if it looks like it needs a label (e.g. recently updated or provisional)
-    // For now, let's show all provisional ones + definitive ones that were recently converted (hard to track without backend flag)
-    // Let's stick to: Show Provisorios (waiting for definitive) AND Definitive ones that haven't been confirmed.
-    // If the user says "Confirmar Colagem", it implies they received the label.
-    // So maybe we should show Definitive assets that don't have the flag.
-    // But that would be ALL assets.
-    // Let's stick to the user's report: "DASHBOARD TEM EQTIQUETAS PENDENTES".
-    // I will show assets that are Provisory OR (Definitive AND !Confirmed).
-    // To avoid showing ALL definitive assets, we might need a "data_patrimonio_definitivo" recent check?
-    // Let's just use the workaround: Show Provisorios. When confirmed, we add the flag.
-    a.patrimonioTipo === "provisorio"
-  )
+  const pendentesEtiqueta = unitAssets.filter((a) => a.etiquetaStatus === "enviada")
+  const canAccessCadastroProvisorio = Boolean(user?.permissions?.acessarCadastrosProvisorios)
+  const canAccessCadastroBem = Boolean(user?.permissions?.cadastrarBem)
 
   const handleConfirmarColagem = async (asset: any) => {
     setConfirmingId(asset.id)
     try {
-        // Workaround: Append tag to observations to mark as confirmed/handled
-        const newObs = asset.observacoes ? `${asset.observacoes} [Etiqueta Colada]` : "[Etiqueta Colada]"
-        
-        await api.updateBem(asset.id, { 
-            observacoes: newObs,
-            // We can also try to update status if needed, but 'ativo' is fine
-        })
+        await api.updateBemEtiquetaFluxo(asset.id, "confirmar_colada")
         
         toast({
             title: "Sucesso",
@@ -117,7 +95,7 @@ export function DashboardAssistente() {
         <div className="flex items-center gap-2 mt-1">
           <Building2 className="h-4 w-4 text-muted-foreground" />
           <p className="text-sm text-muted-foreground">
-            {user?.unidade?.secretaria} - {user?.unidade?.departamento}
+            {user?.unidade?.secretaria} - {assistantDepartments.join(", ")}
           </p>
         </div>
       </div>
@@ -179,8 +157,8 @@ export function DashboardAssistente() {
               <CardTitle className="text-base">Etiquetas Pendentes</CardTitle>
             </div>
             <CardDescription>
-              Estes bens receberam patrimonio provisorio e aguardam a chegada das etiquetas definitivas do
-              gestor de patrimonio. Quando receber, cole no equipamento e confirme aqui.
+              Estes bens ja tiveram a etiqueta enviada pelo gestor. Depois de colar no equipamento,
+              confirme aqui para que o restante da equipe acompanhe.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -206,6 +184,9 @@ export function DashboardAssistente() {
                       <span className="text-xs text-muted-foreground">
                         {asset.localizacao.sala}
                       </span>
+                      <Badge variant="outline" className={`text-[10px] ${getEtiquetaStatusColor(asset.etiquetaStatus)}`}>
+                        {getEtiquetaStatusLabel(asset.etiquetaStatus)}
+                      </Badge>
                     </div>
                   </div>
                   <Button 
@@ -230,7 +211,7 @@ export function DashboardAssistente() {
       )}
 
       {/* Quick actions */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <div className={`grid grid-cols-1 gap-4 ${canAccessCadastroProvisorio || canAccessCadastroBem ? "sm:grid-cols-2" : ""}`}>
         <Link href="/scanner">
           <Card className="hover:border-primary/30 transition-colors cursor-pointer h-full">
             <CardContent className="flex items-center gap-4 p-5">
@@ -246,21 +227,27 @@ export function DashboardAssistente() {
             </CardContent>
           </Card>
         </Link>
-        <Link href="/cadastro">
-          <Card className="hover:border-primary/30 transition-colors cursor-pointer h-full">
-            <CardContent className="flex items-center gap-4 p-5">
-              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent/10">
-                <Package className="h-6 w-6 text-accent" />
-              </div>
-              <div>
-                <p className="text-sm font-semibold">Cadastrar Novo Bem</p>
-                <p className="text-xs text-muted-foreground">
-                  Registrar um equipamento na unidade
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-        </Link>
+        {(canAccessCadastroProvisorio || canAccessCadastroBem) && (
+          <Link href={canAccessCadastroProvisorio ? "/cadastros-provisorios" : "/cadastro"}>
+            <Card className="hover:border-primary/30 transition-colors cursor-pointer h-full">
+              <CardContent className="flex items-center gap-4 p-5">
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent/10">
+                  <Package className="h-6 w-6 text-accent" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold">
+                    {canAccessCadastroProvisorio ? "Cadastro Provisório da Unidade" : "Cadastrar Novo Bem"}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {canAccessCadastroProvisorio
+                      ? "Registrar itens da unidade para revisão do patrimônio"
+                      : "Registrar um equipamento na unidade"}
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          </Link>
+        )}
       </div>
 
       {/* Unit assets list */}
@@ -268,7 +255,7 @@ export function DashboardAssistente() {
         <CardHeader>
           <CardTitle className="text-base">Bens da Minha Unidade</CardTitle>
           <CardDescription>
-            {unitAssets.length} bens registrados em {user?.unidade?.departamento}
+            {unitAssets.length} bens registrados em {assistantDepartments.join(", ")}
           </CardDescription>
         </CardHeader>
         <CardContent>

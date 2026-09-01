@@ -1,13 +1,14 @@
 
 import { NextResponse } from "next/server"
 import { execute, queryOne } from "@/lib/db"
+import { withPermission } from "@/lib/api-auth"
 
-export async function DELETE(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export const DELETE = withPermission("gerenciarCadastrosAuxiliares", async (
+  request,
+  { params }
+) => {
   try {
-    const { id } = await params
+    const id = params?.id
 
     // Verificar se existe
     const servidor = await queryOne("SELECT id FROM servidores WHERE id = ?", [id])
@@ -28,4 +29,4 @@ export async function DELETE(
       { status: 500 }
     )
   }
-}
+})

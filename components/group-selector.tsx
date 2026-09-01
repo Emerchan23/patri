@@ -47,11 +47,12 @@ export function GroupSelector({
   value,
   onValueChange,
   className,
-  placeholder = "Selecione um grupo",
+  placeholder = "Selecione",
 }: GroupSelectorProps) {
   const [open, setOpen] = React.useState(false)
   const [manageOpen, setManageOpen] = React.useState(false)
-  const { data: groups = [] } = useSWR<Grupo[]>("/api/grupos", fetcher)
+  const { data: result } = useSWR("/api/grupos?all=true", fetcher)
+  const groups = Array.isArray(result) ? result : (result?.data || [])
   const { toast } = useToast()
 
   // Gerenciamento de grupos
@@ -75,11 +76,14 @@ export function GroupSelector({
       } else {
         toast({ title: "Sucesso", description: "Grupo criado com sucesso!" })
         setNewGroup("")
+        mutate("/api/grupos?all=true")
+        // Also mutate the paginated list if visible
         mutate("/api/grupos")
       }
     } catch (error: any) {
       console.error("Error creating group:", error)
-      toast({ title: "Erro", description: error.message || "Erro ao criar grupo. Tente novamente.", variant: "destructive" })
+      const msg = error.response?.data?.error || error.message || "Erro ao criar grupo."
+      toast({ title: "Erro", description: msg, variant: "destructive" })
     } finally {
       setIsCreating(false)
     }
@@ -95,10 +99,12 @@ export function GroupSelector({
       } else {
         toast({ title: "Sucesso", description: "Grupo removido com sucesso!" })
         if (value === nome) onValueChange("")
+        mutate("/api/grupos?all=true")
         mutate("/api/grupos")
       }
-    } catch (error) {
-      toast({ title: "Erro", description: "Erro ao remover grupo", variant: "destructive" })
+    } catch (error: any) {
+      const msg = error.response?.data?.error || error.message || "Erro ao remover grupo"
+      toast({ title: "Erro", description: msg, variant: "destructive" })
     }
   }
 
@@ -110,7 +116,7 @@ export function GroupSelector({
             variant="outline"
             role="combobox"
             aria-expanded={open}
-            className={cn("w-full justify-between font-normal", !value && "text-muted-foreground")}
+            className={cn("w-full justify-between", className)}
           >
             {value || placeholder}
             <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
@@ -122,7 +128,7 @@ export function GroupSelector({
             <CommandList>
               <CommandEmpty>Nenhum grupo encontrado.</CommandEmpty>
               <CommandGroup>
-                {groups.map((group) => (
+                {groups.map((group: any) => (
                   <CommandItem
                     key={group.id}
                     value={group.nome}
@@ -173,7 +179,7 @@ export function GroupSelector({
               </div>
             ) : (
               <ul className="divide-y">
-                {groups.map((group) => (
+                {groups.map((group: any) => (
                   <li key={group.id} className="flex items-center justify-between p-2 hover:bg-muted/50">
                     <span className="text-sm">{group.nome}</span>
                     <Button 

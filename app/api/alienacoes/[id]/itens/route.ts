@@ -1,20 +1,15 @@
 import { NextResponse } from "next/server"
 import { query, queryOne, execute } from "@/lib/db"
-import { getAuthUser } from "@/lib/auth-utils"
+import { withPermission } from "@/lib/api-auth"
 
 // POST /api/alienacoes/[id]/itens - Adicionar item
-export async function POST(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export const POST = withPermission("gerenciarAlienacoes", async (
+  request,
+  { params }
+) => {
   try {
-    const user = await getAuthUser()
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    }
-
     const { bem_id } = await request.json()
-    const { id: alienacaoId } = await params
+    const alienacaoId = params?.id
 
     // Verificar se alienacao existe e esta aberta
     const alienacao = await queryOne<any>("SELECT status FROM alienacoes WHERE id = ?", [alienacaoId])
@@ -55,22 +50,17 @@ export async function POST(
     console.error("Erro ao adicionar item:", error)
     return NextResponse.json({ error: "Erro interno do servidor" }, { status: 500 })
   }
-}
+})
 
 // DELETE /api/alienacoes/[id]/itens - Remover item
-export async function DELETE(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export const DELETE = withPermission("gerenciarAlienacoes", async (
+  request,
+  { params }
+) => {
   try {
-    const user = await getAuthUser()
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    }
-
     const { searchParams } = new URL(request.url)
     const bem_id = searchParams.get("bemId")
-    const { id: alienacaoId } = await params
+    const alienacaoId = params?.id
 
     if (!bem_id) {
         return NextResponse.json({ error: "ID do bem necessario" }, { status: 400 })
@@ -94,4 +84,4 @@ export async function DELETE(
     console.error("Erro ao remover item:", error)
     return NextResponse.json({ error: "Erro interno do servidor" }, { status: 500 })
   }
-}
+})

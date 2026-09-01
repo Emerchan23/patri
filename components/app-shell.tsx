@@ -77,13 +77,20 @@ const allNavigation: NavItem[] = [
     badge: "Novo",
     requiredPermission: "verPendenciasPatrimonio",
   },
+  {
+    name: "Cadastros Provisorios",
+    href: "/cadastros-provisorios",
+    icon: FolderOpen,
+    badge: "Unidade",
+    requiredPermission: "acessarCadastrosProvisorios",
+  },
   { name: "Cadastrar Bem", href: "/cadastro", icon: Plus, badge: "NF", requiredPermission: "cadastrarBem" },
   { name: "Bens Patrimoniais", href: "/bens", icon: Package },
   {
     name: "Movimentacoes",
     href: "/movimentacoes",
     icon: ArrowRightLeft,
-    requiredPermission: "registrarMovimentacao",
+    requiredPermission: "acessarMovimentacoes",
   },
   {
     name: "Emprestimos",
@@ -142,8 +149,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [globalSearch, setGlobalSearch] = useState("")
 
   // Fetch real secretarias from API
-  const { data: secretariasData } = useSWR<Secretaria[]>("/secretarias", fetcher)
-  const secretarias = secretariasData || []
+  const { data: secretariasResponse } = useSWR("/secretarias?all=true", fetcher)
+  const secretarias = Array.isArray(secretariasResponse) ? secretariasResponse : (secretariasResponse?.data || [])
 
   // Global search handler
   const handleGlobalSearch = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -234,10 +241,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
   }
 
+  // Prevent body scroll when AppShell is active to avoid white space at the bottom
+  React.useEffect(() => {
+    const originalOverflow = document.body.style.overflow
+    document.body.style.overflow = "hidden"
+    return () => {
+      document.body.style.overflow = originalOverflow
+    }
+  }, [])
+
   const currentStyle = styles[sidebarColor as keyof typeof styles] || styles.dark
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-50/50">
+    <div className="flex h-[100dvh] w-full overflow-hidden bg-slate-50/50 fixed inset-0">
       {/* Mobile overlay */}
       {sidebarOpen && (
         <div
@@ -362,7 +378,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </p>
               </div>
               <ul className="flex flex-col gap-1">
-                {secretarias.map((sec) => {
+                {(secretarias as Secretaria[]).map((sec) => {
                   const secKey = sec.nome
                   const isExpanded = expandedSecretaria === secKey
                   return (
@@ -448,7 +464,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     "text-xs pl-6",
                     currentStyle.userSub
                 )}>
-                  {user.unidade.departamento}
+                  {(user.unidade.departamentos?.length ? user.unidade.departamentos : [user.unidade.departamento].filter(Boolean)).join(", ")}
                 </p>
               </div>
             </>

@@ -1,15 +1,10 @@
 import { NextResponse } from "next/server"
 import { query, execute } from "@/lib/db"
-import { getAuthUser } from "@/lib/auth-utils"
+import { withPermission } from "@/lib/api-auth"
 
 // GET /api/alienacoes - Listar alienacoes
-export async function GET(request: Request) {
+export const GET = withPermission("gerenciarAlienacoes", async () => {
   try {
-    const user = await getAuthUser()
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    }
-
     const alienacoes = await query(`
       SELECT 
         a.*,
@@ -25,16 +20,11 @@ export async function GET(request: Request) {
     console.error("Erro ao listar alienacoes:", error)
     return NextResponse.json({ error: "Erro interno do servidor" }, { status: 500 })
   }
-}
+})
 
 // POST /api/alienacoes - Criar nova alienacao
-export async function POST(request: Request) {
+export const POST = withPermission("gerenciarAlienacoes", async (request, { user }) => {
   try {
-    const user = await getAuthUser()
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    }
-
     const body = await request.json()
     const { 
       tipo, 
@@ -102,4 +92,4 @@ export async function POST(request: Request) {
     console.error("Erro ao criar alienacao:", error)
     return NextResponse.json({ error: "Erro interno do servidor" }, { status: 500 })
   }
-}
+})

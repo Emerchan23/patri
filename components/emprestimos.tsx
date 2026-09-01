@@ -9,7 +9,7 @@ import {
   type Loan,
   type LoanStatus,
 } from "@/lib/data"
-import { fetcher, api } from "@/lib/api-client"
+import { fetcher, api, getApiErrorMessage, isApiError } from "@/lib/api-client"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -75,12 +75,18 @@ export function Emprestimos() {
   const [limit] = useState(20)
   const [searchTerm, setSearchTerm] = useState("")
   const [filterStatus, setFilterStatus] = useState<string>("todos")
+  const [secretariaFilter, setSecretariaFilter] = useState<string>("todas")
+  const [departamentoFilter, setDepartamentoFilter] = useState<string>("todos")
+  const [salaFilter, setSalaFilter] = useState<string>("todos")
 
   const queryParams = new URLSearchParams()
   queryParams.set("page", page.toString())
   queryParams.set("limit", limit.toString())
   if (searchTerm) queryParams.set("busca", searchTerm)
   if (filterStatus !== "todos") queryParams.set("status", filterStatus)
+  if (secretariaFilter !== "todas") queryParams.set("secretaria", secretariaFilter)
+  if (departamentoFilter !== "todos") queryParams.set("departamento", departamentoFilter)
+  if (salaFilter !== "todos") queryParams.set("sala", salaFilter)
 
   const { data: result, mutate: mutateLoans } = useSWR(["emprestimos", queryParams.toString()], () => api.getEmprestimos(queryParams.toString()))
   const loans: Loan[] = result?.data || []
@@ -89,7 +95,7 @@ export function Emprestimos() {
 
   const { data: bensData } = useSWR("/bens?limit=9999", fetcher)
   const { data: veiculosData } = useSWR("/veiculos", fetcher)
-  const { data: secretariasData } = useSWR("/secretarias", fetcher)
+  const { data: secretariasData } = useSWR("/secretarias?all=true", fetcher)
 
   const allAssets = useMemo(() => {
     const b = bensData?.data || bensData || []
@@ -97,13 +103,14 @@ export function Emprestimos() {
     return [...b, ...v]
   }, [bensData, veiculosData])
 
-  const secretarias = secretariasData || []
+  const secretarias = Array.isArray(secretariasData) ? secretariasData : (secretariasData?.data || [])
 
   const [newLoanOpen, setNewLoanOpen] = useState(false)
   const [devolucaoOpen, setDevolucaoOpen] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [selectedLoan, setSelectedLoan] = useState<Loan | null>(null)
   const [saving, setSaving] = useState(false)
+  const [fieldErrors, setFieldErrors] = useState<string[]>([])
 
   const [formAssetId, setFormAssetId] = useState("")
   const [formDestinoSec, setFormDestinoSec] = useState("")
@@ -114,8 +121,10 @@ export function Emprestimos() {
   const [formSolicitante, setFormSolicitante] = useState("")
   const [formDataEmprestimo, setFormDataEmprestimo] = useState<Date | undefined>(new Date())
   const [formDataPrevista, setFormDataPrevista] = useState<Date | undefined>(undefined)
+  const [semDataPrevista, setSemDataPrevista] = useState(false)
   const [formMotivo, setFormMotivo] = useState("")
   const [formObservacoes, setFormObservacoes] = useState("")
+  const [exigirTermo, setExigirTermo] = useState(true)
   const [formDataDevolucao, setFormDataDevolucao] = useState<Date | undefined>(new Date())
   const [formObsDevolucao, setFormObsDevolucao] = useState("")
 
@@ -140,30 +149,57 @@ export function Emprestimos() {
   )
   const destinoSalas = destinoDep?.salas || []
 
+  const availableDepartamentos = useMemo(() => {
+    if (secretariaFilter !== "todas") {
+      const sec = secretarias.find((item: any) => item.nome === secretariaFilter)
+      return sec?.departamentos || []
+    }
+    return secretarias.flatMap((item: any) => item.departamentos || [])
+  }, [secretarias, secretariaFilter])
+
+  const availableSalas = useMemo(() => {
+    if (departamentoFilter !== "todos") {
+      const dep = availableDepartamentos.find((item: any) => item.nome === departamentoFilter)
+      return dep?.salas || []
+    }
+    return availableDepartamentos.flatMap((item: any) => item.salas || [])
+  }, [availableDepartamentos, departamentoFilter])
+
   const resetNewLoanForm = () => {
     setFormAssetId(""); setFormDestinoSec(""); setFormDestinoDep(""); setFormDestinoSala("")
     setFormResponsavelEmprestimo(""); setFormResponsavelRecebimento(""); setFormSolicitante("")
-    setFormDataEmprestimo(new Date()); setFormDataPrevista(undefined)
+    setFormDataEmprestimo(new Date()); setFormDataPrevista(undefined); setSemDataPrevista(false)
     setFormMotivo(""); setFormObservacoes("")
+    setExigirTermo(true)
   }
 
   const handleCreateLoan = async () => {
     // Validation
     const missingFields: string[] = []
+    const newFieldErrors: string[] = []
 
-    if (!selectedAsset) missingFields.push("Bem Patrimonial")
-    if (!formDestinoSec) missingFields.push("Secretaria de Destino")
-    if (!formDestinoDep) missingFields.push("Departamento")
-    if (!formDestinoSala) missingFields.push("Sala")
-    if (!formDataPrevista) missingFields.push("Data Prevista de Devolução")
-    if (!formMotivo.trim()) missingFields.push("Motivo")
-    if (!formResponsavelEmprestimo.trim()) missingFields.push("Responsável pelo Empréstimo")
-    if (!formResponsavelRecebimento.trim()) missingFields.push("Responsável pelo Recebimento")
+    if (!selectedAsset) { missingFields.push("Bem Patrimonial"); newFieldErrors.push("formAssetId"); }
+    if (!formDestinoSec) { missingFields.push("Secretaria de Destino"); newFieldErrors.push("formDestinoSec"); }
+    if (!formDestinoDep) { missingFields.push("Departamento"); newFieldErrors.push("formDestinoDep"); }
+    if (!formDestinoSala) { missingFields.push("Sala"); newFieldErrors.push("formDestinoSala"); }
+    if (!semDataPrevista && !formDataPrevista) { missingFields.push("Data Prevista de Devolução ou opção sem prazo"); newFieldErrors.push("formDataPrevista"); }
+    if (!formMotivo.trim()) { missingFields.push("Motivo"); newFieldErrors.push("formMotivo"); }
+    if (!formResponsavelEmprestimo.trim()) { missingFields.push("Responsável pelo Empréstimo"); newFieldErrors.push("formResponsavelEmprestimo"); }
+    if (!formResponsavelRecebimento.trim()) { missingFields.push("Responsável pelo Recebimento"); newFieldErrors.push("formResponsavelRecebimento"); }
     
+    setFieldErrors(newFieldErrors)
+
     if (missingFields.length > 0) {
       toast({ 
         title: "Campos Obrigatórios Faltando", 
-        description: `Por favor, preencha os seguintes campos: ${missingFields.join(", ")}.`, 
+        description: (
+            <div className="flex flex-col gap-1">
+                <p>Por favor, preencha os seguintes campos:</p>
+                <ul className="list-disc pl-4 text-xs">
+                    {missingFields.map((f, i) => <li key={i}>{f}</li>)}
+                </ul>
+            </div>
+        ),
         variant: "destructive",
         duration: 5000,
       })
@@ -182,9 +218,10 @@ export function Emprestimos() {
         responsavelRecebimento: formResponsavelRecebimento,
         solicitante: formSolicitante,
         dataEmprestimo: formDataEmprestimo?.toISOString().split("T")[0],
-        dataPrevistaDevolucao: formDataPrevista!.toISOString().split("T")[0],
+        dataPrevistaDevolucao: semDataPrevista ? undefined : formDataPrevista!.toISOString().split("T")[0],
         motivo: formMotivo,
         observacoes: formObservacoes || undefined,
+        exigirTermo,
       })
       await mutateLoans()
       
@@ -199,7 +236,10 @@ export function Emprestimos() {
       console.error(e)
       toast({
         title: "Erro ao criar empréstimo",
-        description: "Não foi possível registrar o empréstimo. Tente novamente.",
+        description:
+          isApiError(e) && e.status === 403
+            ? "Você não tem permissão para registrar este empréstimo."
+            : getApiErrorMessage(e, "Não foi possível registrar o empréstimo. Tente novamente."),
         variant: "destructive",
       })
     }
@@ -233,7 +273,7 @@ export function Emprestimos() {
       console.error(e)
       toast({
         title: "Erro ao registrar devolução",
-        description: "Não foi possível registrar a devolução. Tente novamente.",
+        description: getApiErrorMessage(e, "Não foi possível registrar a devolução. Tente novamente."),
         variant: "destructive",
       })
     }
@@ -247,8 +287,13 @@ export function Emprestimos() {
     setDevolucaoOpen(true)
   }
 
-  const openDetails = (loan: Loan) => {
-    setSelectedLoan(loan)
+  const openDetails = async (loan: Loan) => {
+    try {
+      const completeLoan = await api.getEmprestimo(loan.id)
+      setSelectedLoan(completeLoan)
+    } catch {
+      setSelectedLoan(loan)
+    }
     setDetailsOpen(true)
   }
 
@@ -275,7 +320,7 @@ export function Emprestimos() {
       </div>
 
       <Card>
-        <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center">
+        <CardContent className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-[minmax(280px,1.4fr)_180px_1fr_1fr_1fr]">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input placeholder="Buscar por bem, patrimonio, secretaria, responsavel..." value={searchTerm} onChange={(e) => { setSearchTerm(e.target.value); setPage(1); }} className="pl-9" />
@@ -289,6 +334,46 @@ export function Emprestimos() {
               <SelectItem value="devolvido">Devolvidos</SelectItem>
             </SelectContent>
           </Select>
+          <Select value={secretariaFilter} onValueChange={(v) => { setSecretariaFilter(v); setDepartamentoFilter("todos"); setSalaFilter("todos"); setPage(1) }}>
+            <SelectTrigger><SelectValue placeholder="Todas as secretarias" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="todas">Todas as secretarias</SelectItem>
+              {secretarias.map((sec: any) => (
+                <SelectItem key={sec.nome} value={sec.nome}>{sec.nome}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <SearchableSelect
+            value={departamentoFilter}
+            onValueChange={(v) => { setDepartamentoFilter(v || "todos"); setSalaFilter("todos"); setPage(1) }}
+            placeholder="Todos os departamentos"
+            searchPlaceholder="Buscar departamento..."
+            items={[
+              { value: "todos", label: "Todos os departamentos", searchTerms: "todos" },
+              ...availableDepartamentos.map((dep: any) => ({
+                value: dep.nome,
+                label: dep.nome,
+                searchTerms: dep.nome,
+              })),
+            ]}
+          />
+          <SearchableSelect
+            value={salaFilter}
+            onValueChange={(v) => { setSalaFilter(v || "todos"); setPage(1) }}
+            placeholder="Todas as salas"
+            searchPlaceholder="Buscar sala..."
+            items={[
+              { value: "todos", label: "Todas as salas", searchTerms: "todos" },
+              ...availableSalas.map((room: any) => {
+                const name = typeof room === "string" ? room : room.nome
+                return {
+                  value: name,
+                  label: name,
+                  searchTerms: name,
+                }
+              }),
+            ]}
+          />
         </CardContent>
       </Card>
 
@@ -437,17 +522,24 @@ export function Emprestimos() {
 
       {/* New Loan Dialog */}
       <Dialog open={newLoanOpen} onOpenChange={setNewLoanOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Novo Emprestimo</DialogTitle>
-            <DialogDescription>Registre o emprestimo de um equipamento para outra secretaria ou departamento</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="space-y-2">
-              <Label required>Bem Patrimonial</Label>
-              <SearchableSelect
+        <DialogContent className="max-w-4xl h-[90vh] flex flex-col p-0 gap-0">
+          <div className="p-6 pb-4 border-b">
+            <DialogHeader>
+              <DialogTitle>Novo Emprestimo</DialogTitle>
+              <DialogDescription>Registre o emprestimo de um equipamento para outra secretaria ou departamento</DialogDescription>
+            </DialogHeader>
+          </div>
+          
+          <div className="flex-1 overflow-y-auto px-6 py-6">
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label required className={fieldErrors.includes("formAssetId") ? "text-destructive" : ""}>Bem Patrimonial</Label>
+                <SearchableSelect
                 value={formAssetId}
-                onValueChange={setFormAssetId}
+                onValueChange={(v) => {
+                    setFormAssetId(v)
+                    if (fieldErrors.includes("formAssetId")) setFieldErrors(prev => prev.filter(e => e !== "formAssetId"))
+                }}
                 items={availableAssets.map((a: any) => ({
                   value: a.id,
                   label: `${a.patrimonio} - ${a.descricao}`,
@@ -455,31 +547,38 @@ export function Emprestimos() {
                 }))}
                 placeholder="Selecione o bem a ser emprestado"
                 searchPlaceholder="Buscar por nome ou patrimônio..."
+                className={fieldErrors.includes("formAssetId") ? "border-destructive ring-offset-destructive" : ""}
               />
             </div>
             {selectedAsset && (
               <div className="rounded-lg border bg-muted/50 p-3 space-y-1">
                 <p className="text-xs font-semibold text-muted-foreground uppercase">Localizacao Atual (Origem)</p>
-                <p className="text-sm text-foreground">{selectedAsset.localizacao?.secretaria} {" > "} {selectedAsset.localizacao?.departamento} {" > "} {selectedAsset.localizacao?.sala}</p>
+                <p className="text-sm font-medium text-foreground break-words">{selectedAsset.descricao}</p>
+                <p className="text-xs font-mono text-muted-foreground">{selectedAsset.patrimonio}</p>
+                <p className="text-sm text-foreground break-words">{selectedAsset.localizacao?.secretaria} {" > "} {selectedAsset.localizacao?.departamento} {" > "} {selectedAsset.localizacao?.sala}</p>
               </div>
             )}
             <div className="space-y-2">
               <Label className="flex items-center gap-1.5" required><Building2 className="h-4 w-4 text-primary" />Destino</Label>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground" required>Secretaria</Label>
-                  <Select value={formDestinoSec} onValueChange={(v) => { setFormDestinoSec(v); setFormDestinoDep(""); setFormDestinoSala(""); }}>
-                    <SelectTrigger><SelectValue placeholder="Secretaria" /></SelectTrigger>
+                  <Label className={`text-xs text-muted-foreground ${fieldErrors.includes("formDestinoSec") ? "text-destructive" : ""}`} required>Secretaria</Label>
+                  <Select value={formDestinoSec} onValueChange={(v) => { 
+                      setFormDestinoSec(v); setFormDestinoDep(""); setFormDestinoSala(""); 
+                      if (fieldErrors.includes("formDestinoSec")) setFieldErrors(prev => prev.filter(e => e !== "formDestinoSec"))
+                  }}>
+                    <SelectTrigger className={fieldErrors.includes("formDestinoSec") ? "border-destructive ring-offset-destructive" : ""}><SelectValue placeholder="Secretaria" /></SelectTrigger>
                     <SelectContent>{secretarias.map((s: any) => (<SelectItem key={s.nome} value={s.nome}>{s.nome}</SelectItem>))}</SelectContent>
                   </Select>
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground" required>Departamento</Label>
+                  <Label className={`text-xs text-muted-foreground ${fieldErrors.includes("formDestinoDep") ? "text-destructive" : ""}`} required>Departamento</Label>
                   <SearchableSelect
                     value={formDestinoDep}
                     onValueChange={(v) => {
                       setFormDestinoDep(v)
                       setFormDestinoSala("")
+                      if (fieldErrors.includes("formDestinoDep")) setFieldErrors(prev => prev.filter(e => e !== "formDestinoDep"))
                     }}
                     items={destinoDeptos.map((d: any) => ({
                       value: d.nome,
@@ -488,13 +587,17 @@ export function Emprestimos() {
                     }))}
                     placeholder="Departamento"
                     searchPlaceholder="Buscar departamento..."
+                    className={fieldErrors.includes("formDestinoDep") ? "border-destructive ring-offset-destructive" : ""}
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground" required>Sala</Label>
+                  <Label className={`text-xs text-muted-foreground ${fieldErrors.includes("formDestinoSala") ? "text-destructive" : ""}`} required>Sala</Label>
                   <SearchableSelect
                     value={formDestinoSala}
-                    onValueChange={setFormDestinoSala}
+                    onValueChange={(v) => {
+                        setFormDestinoSala(v)
+                        if (fieldErrors.includes("formDestinoSala")) setFieldErrors(prev => prev.filter(e => e !== "formDestinoSala"))
+                    }}
                     items={destinoSalas.map((s: any) => {
                       const label = typeof s === "string" ? s : s.nome
                       return {
@@ -505,28 +608,37 @@ export function Emprestimos() {
                     })}
                     placeholder="Sala"
                     searchPlaceholder="Buscar sala..."
+                    className={fieldErrors.includes("formDestinoSala") ? "border-destructive ring-offset-destructive" : ""}
                   />
                 </div>
               </div>
             </div>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <div className="space-y-2">
-                <Label required>Responsavel pelo Emprestimo</Label>
+                <Label required className={fieldErrors.includes("formResponsavelEmprestimo") ? "text-destructive" : ""}>Responsavel pelo Emprestimo</Label>
                 <ResponsavelSelect 
                   value={formResponsavelEmprestimo} 
-                  onValueChange={setFormResponsavelEmprestimo} 
+                  onValueChange={(v) => {
+                      setFormResponsavelEmprestimo(v)
+                      if (fieldErrors.includes("formResponsavelEmprestimo")) setFieldErrors(prev => prev.filter(e => e !== "formResponsavelEmprestimo"))
+                  }}
                   placeholder="Selecione quem autoriza"
+                  className={fieldErrors.includes("formResponsavelEmprestimo") ? "border-destructive ring-offset-destructive" : ""}
                 />
               </div>
               <div className="space-y-2">
-                <Label required>Responsavel pelo Recebimento</Label>
+                <Label required className={fieldErrors.includes("formResponsavelRecebimento") ? "text-destructive" : ""}>Responsavel pelo Recebimento</Label>
                 <ResponsavelSelect 
                   value={formResponsavelRecebimento} 
-                  onValueChange={setFormResponsavelRecebimento} 
+                  onValueChange={(v) => {
+                      setFormResponsavelRecebimento(v)
+                      if (fieldErrors.includes("formResponsavelRecebimento")) setFieldErrors(prev => prev.filter(e => e !== "formResponsavelRecebimento"))
+                  }}
                   placeholder="Selecione quem recebe"
+                  className={fieldErrors.includes("formResponsavelRecebimento") ? "border-destructive ring-offset-destructive" : ""}
                 />
               </div>
-              <div className="space-y-2 col-span-2">
+              <div className="space-y-2 lg:col-span-2">
                 <Label>Solicitante / Retirado por</Label>
                 <ResponsavelSelect 
                   value={formSolicitante} 
@@ -537,18 +649,57 @@ export function Emprestimos() {
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div className="space-y-2"><Label required>Data do Emprestimo</Label><DatePicker date={formDataEmprestimo} setDate={setFormDataEmprestimo} /></div>
-              <div className="space-y-2"><Label required>Data Prevista de Devolucao</Label><DatePicker date={formDataPrevista} setDate={setFormDataPrevista} /></div>
+              <div className="space-y-2">
+                  <Label className={fieldErrors.includes("formDataPrevista") ? "text-destructive" : ""}>Data Prevista de Devolucao</Label>
+                  <DatePicker 
+                    date={semDataPrevista ? undefined : formDataPrevista} 
+                    setDate={(d) => {
+                        setSemDataPrevista(false)
+                        setFormDataPrevista(d)
+                        if (fieldErrors.includes("formDataPrevista")) setFieldErrors(prev => prev.filter(e => e !== "formDataPrevista"))
+                    }} 
+                    disabled={semDataPrevista}
+                  />
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <input type="checkbox" checked={semDataPrevista} onChange={(e) => {
+                      setSemDataPrevista(e.target.checked)
+                      if (e.target.checked) setFormDataPrevista(undefined)
+                      setFieldErrors(prev => prev.filter(error => error !== "formDataPrevista"))
+                    }} />
+                    Devolucao sem data definida
+                  </label>
+              </div>
             </div>
-            <div className="space-y-2"><Label required>Motivo do Emprestimo</Label><Textarea placeholder="Descreva o motivo do emprestimo..." value={formMotivo} onChange={(e) => setFormMotivo(e.target.value)} rows={2} /></div>
+            <div className="space-y-2">
+                <Label required className={fieldErrors.includes("formMotivo") ? "text-destructive" : ""}>Motivo do Emprestimo</Label>
+                <Textarea 
+                    placeholder="Descreva o motivo do emprestimo..." 
+                    value={formMotivo} 
+                    onChange={(e) => {
+                        setFormMotivo(e.target.value)
+                        if (fieldErrors.includes("formMotivo")) setFieldErrors(prev => prev.filter(e => e !== "formMotivo"))
+                    }} 
+                    rows={2} 
+                    className={fieldErrors.includes("formMotivo") ? "border-destructive focus-visible:ring-destructive" : ""}
+                />
+            </div>
             <div className="space-y-2"><Label>Observacoes (opcional)</Label><Textarea placeholder="Observacoes adicionais..." value={formObservacoes} onChange={(e) => setFormObservacoes(e.target.value)} rows={2} /></div>
+            <label className="flex items-start gap-3 rounded-lg border bg-primary/5 p-3 text-sm cursor-pointer">
+              <input type="checkbox" checked={exigirTermo} onChange={(e) => setExigirTermo(e.target.checked)} className="mt-1 h-4 w-4" />
+              <span><strong>Gerar termo de responsabilidade</strong><span className="block text-xs text-muted-foreground">O PDF terá o timbre configurado e ficará aguardando o upload do documento assinado.</span></span>
+            </label>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setNewLoanOpen(false)}>Cancelar</Button>
-            <Button onClick={handleCreateLoan} disabled={saving}>
-              {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Registrar Emprestimo
-            </Button>
-          </DialogFooter>
+          </div>
+
+          <div className="p-4 border-t bg-background mt-auto z-10">
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setNewLoanOpen(false)}>Cancelar</Button>
+              <Button onClick={handleCreateLoan} disabled={saving}>
+                {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Registrar Emprestimo
+              </Button>
+            </DialogFooter>
+          </div>
         </DialogContent>
       </Dialog>
 
@@ -639,6 +790,14 @@ export function Emprestimos() {
               </div>
               <div><p className="text-xs text-muted-foreground">Motivo</p><p className="text-sm">{selectedLoan.motivo}</p></div>
               {selectedLoan.observacoes && (<div><p className="text-xs text-muted-foreground">Observacoes</p><p className="text-sm">{selectedLoan.observacoes}</p></div>)}
+              {selectedLoan.termo && (
+                <div className="rounded-lg border border-primary/20 bg-primary/5 p-3">
+                  <p className="text-xs font-semibold uppercase text-muted-foreground">Termo de responsabilidade</p>
+                  <p className="text-sm font-medium">{selectedLoan.termo.status === "assinado" ? "Assinado e anexado" : "Aguardando assinatura"}</p>
+                  {selectedLoan.termo.assinadoEm && <p className="text-xs text-muted-foreground">Anexado em {formatDate(selectedLoan.termo.assinadoEm)}</p>}
+                  {selectedLoan.termo.arquivoAssinado && <a href={selectedLoan.termo.arquivoAssinado} target="_blank" rel="noreferrer" className="mt-1 inline-block text-xs text-primary underline">Abrir documento assinado</a>}
+                </div>
+              )}
               {(selectedLoan.status === "ativo" || selectedLoan.status === "atrasado") && (
                 <div className="pt-2 flex gap-2">
                   <Button className="flex-1" onClick={() => { setDetailsOpen(false); openDevolucao(selectedLoan); }}>

@@ -3,12 +3,17 @@ import { query, execute } from "@/lib/db"
 import { withAuth } from "@/lib/api-auth"
 import { registrarLog } from "@/lib/audit"
 import { criarNotificacao } from "@/lib/notifications"
+import { appendScopeClause, assertAssetAccess, getTransferScopeClause, isLocationInScope } from "@/lib/asset-scope"
+import { ensureTermosResponsabilidadeSchema } from "@/lib/termos-responsabilidade-schema"
 
 // GET /api/emprestimos
-export const GET = withAuth(async (request) => {
+export const GET = withAuth(async (request, { user }) => {
   const url = new URL(request.url)
   const status = url.searchParams.get("status")
   const busca = url.searchParams.get("busca")
+  const secretaria = url.searchParams.get("secretaria")
+  const departamento = url.searchParams.get("departamento")
+  const sala = url.searchParams.get("sala")
   
   const page = parseInt(url.searchParams.get("page") || "1")
   const limit = parseInt(url.searchParams.get("limit") || "20")
@@ -16,10 +21,33 @@ export const GET = withAuth(async (request) => {
 
   let whereClause = "WHERE 1=1"
   const params: unknown[] = []
+  const scoped = appendScopeClause(whereClause, params, getTransferScopeClause(user, {
+    fromSecretariaColumn: "e.origem_secretaria",
+    fromDepartamentoColumn: "e.origem_departamento",
+    toSecretariaColumn: "e.destino_secretaria",
+    toDepartamentoColumn: "e.destino_departamento",
+  }))
+  whereClause = scoped.whereClause
+  params.push(...scoped.params)
 
   if (status) {
     whereClause += " AND e.status = ?"
     params.push(status)
+  }
+
+  if (secretaria) {
+    whereClause += " AND (e.origem_secretaria = ? OR e.destino_secretaria = ?)"
+    params.push(secretaria, secretaria)
+  }
+
+  if (departamento) {
+    whereClause += " AND (e.origem_departamento = ? OR e.destino_departamento = ?)"
+    params.push(departamento, departamento)
+  }
+
+  if (sala) {
+    whereClause += " AND (e.origem_sala = ? OR e.destino_sala = ?)"
+    params.push(sala, sala)
   }
 
   if (busca) {
@@ -76,6 +104,17 @@ export const GET = withAuth(async (request) => {
 // POST /api/emprestimos
 export const POST = withAuth(async (request, { user }) => {
   const body = await request.json()
+  await ensureTermosResponsabilidadeSchema()
+  if (body.assetId) {
+    try {
+      await assertAssetAccess(user, body.assetId)
+    } catch {
+      return NextResponse.json({ error: "Sem permissao para emprestar este bem" }, { status: 403 })
+    }
+  }
+  if (!isLocationInScope(user, body.destino)) {
+    return NextResponse.json({ error: "Sem permissao para emprestar bem para este destino" }, { status: 403 })
+  }
 
   const result = await execute(
     `INSERT INTO emprestimos (bem_id, bem_descricao, patrimonio, origem_secretaria, origem_departamento, origem_sala,
@@ -95,6 +134,15 @@ export const POST = withAuth(async (request, { user }) => {
   // Update asset status to emprestado
   if (body.assetId) {
     await execute("UPDATE bens SET status = 'emprestado' WHERE id = ?", [body.assetId])
+  }
+
+  if (body.exigirTermo !== false) {
+    await execute(
+      `INSERT INTO termos_responsabilidade
+       (emprestimo_id, bem_id, patrimonio, responsavel_nome, responsavel_cargo, gerado_por_usuario_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [result.insertId, body.assetId || null, body.patrimonio, body.responsavelRecebimento, body.cargoResponsavelRecebimento || null, user.id]
+    )
   }
 
   await registrarLog({

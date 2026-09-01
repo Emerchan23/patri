@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server"
 import { execute } from "@/lib/db"
+import { withRole } from "@/lib/api-auth"
 
 export const dynamic = 'force-dynamic'
 
-export async function GET() {
+export const GET = withRole(["administrador"], async () => {
   try {
     // Check if column exists or just try to add it (ignore error if exists)
     try {
@@ -16,6 +17,6 @@ export async function GET() {
         throw e
     }
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ error: "Erro ao aplicar migracao" }, { status: 500 })
   }
-}
+})

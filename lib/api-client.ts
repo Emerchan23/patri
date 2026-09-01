@@ -4,17 +4,53 @@ import type { User } from "./auth"
 
 const BASE = "/api"
 
+export class ApiError extends Error {
+  status: number
+  body?: any
+
+  constructor(message: string, status: number, body?: any) {
+    super(message)
+    this.name = "ApiError"
+    this.status = status
+    this.body = body
+  }
+}
+
+export const isApiError = (error: unknown): error is ApiError => error instanceof ApiError
+
+export const getApiErrorMessage = (error: unknown, fallback: string) => {
+  if (isApiError(error)) return error.message || fallback
+  if (error instanceof Error) return error.message || fallback
+  return fallback
+}
+
+// Simple event system for auth expiration
+type AuthExpiredCallback = () => void
+const authExpiredListeners: AuthExpiredCallback[] = []
+
+export const onAuthExpired = (callback: AuthExpiredCallback) => {
+  authExpiredListeners.push(callback)
+  return () => {
+    const index = authExpiredListeners.indexOf(callback)
+    if (index > -1) authExpiredListeners.splice(index, 1)
+  }
+}
+
 async function request<T = any>(endpoint: string, options?: RequestInit): Promise<T> {
   const url = endpoint.startsWith(BASE) ? endpoint : `${BASE}${endpoint}`
+  const isMultipart = typeof FormData !== "undefined" && options?.body instanceof FormData
   const res = await fetch(url, {
-    headers: { "Content-Type": "application/json", ...options?.headers },
+    headers: isMultipart ? options?.headers : { "Content-Type": "application/json", ...options?.headers },
     credentials: "include",
     ...options,
   })
   if (res.status === 401) {
+    // Notify listeners (AuthProvider)
+    authExpiredListeners.forEach(cb => cb())
+    
     // Session expired - throw error to let components handle redirection if needed
     // DO NOT force reload here, as it causes infinite loops if a component fetches data on mount
-    throw new Error("Sessao expirada")
+    throw new ApiError("Sessao expirada", 401)
   }
   if (!res.ok) {
     const errText = await res.text()
@@ -25,7 +61,7 @@ async function request<T = any>(endpoint: string, options?: RequestInit): Promis
         errObj = { error: errText || `Erro ${res.status}` }
     }
     console.error("API Error:", errObj)
-    throw new Error(errObj.error || `Erro ${res.status}`)
+    throw new ApiError(errObj.error || `Erro ${res.status}`, res.status, errObj)
   }
   return res.json()
 }
@@ -48,8 +84,12 @@ export const api = {
   getBem: (id: number | string) => request(`/bens/${id}`),
   createBem: (data: any) =>
     request("/bens", { method: "POST", body: JSON.stringify(data) }),
+  validateBemCodes: (codes: Array<{ code: string; field?: "patrimonio" | "patrimonioProvisorio"; itemIndex?: number }>) =>
+    request("/bens/disponibilidade", { method: "POST", body: JSON.stringify({ codes }) }),
   updateBem: (id: number | string, data: any) =>
     request(`/bens/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  updateBemEtiquetaFluxo: (id: number | string, action: "marcar_enviada" | "confirmar_colada" | "reabrir_pendente") =>
+    request(`/bens/${id}/etiqueta`, { method: "PATCH", body: JSON.stringify({ action }) }),
   deleteBem: (id: number | string, motivo?: string) =>
     request(`/bens/${id}`, { method: "DELETE", body: JSON.stringify({ motivo }) }),
 
@@ -66,10 +106,21 @@ export const api = {
   getMovimentacoes: (params?: string) => request(`/movimentacoes${params ? `?${params}` : ""}`),
   createMovimentacao: (data: any) =>
     request("/movimentacoes", { method: "POST", body: JSON.stringify(data) }),
+  getSolicitacoesMovimentacao: (params?: string) => request(`/solicitacoes-movimentacao${params ? `?${params}` : ""}`),
+  createSolicitacaoMovimentacao: (data: any) =>
+    request("/solicitacoes-movimentacao", { method: "POST", body: JSON.stringify(data) }),
+  updateSolicitacaoMovimentacao: (id: number | string, data: any) =>
+    request(`/solicitacoes-movimentacao/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
 
   // Emprestimos
   getEmprestimos: (params?: string) => request(`/emprestimos${params ? `?${params}` : ""}`),
   getEmprestimo: (id: number | string) => request(`/emprestimos/${id}`),
+  getTermoEmprestimo: (id: number | string) => request(`/emprestimos/${id}/termo`),
+  uploadTermoEmprestimo: (id: number | string, file: File) => {
+    const form = new FormData()
+    form.append("arquivo", file)
+    return request(`/emprestimos/${id}/termo/arquivo`, { method: "POST", body: form })
+  },
   createEmprestimo: (data: any) =>
     request("/emprestimos", { method: "POST", body: JSON.stringify(data) }),
   devolverEmprestimo: (id: number | string, data?: any) =>
@@ -89,7 +140,7 @@ export const api = {
     request("/logs", { method: "POST", body: JSON.stringify(data) }),
 
   // Cadastros Auxiliares
-  getCategorias: () => request("/categorias"),
+  getCategorias: (params?: string) => request(`/categorias${params ? `?${params}` : ""}`),
   createCategoria: (data: any) =>
     request("/categorias", { method: "POST", body: JSON.stringify(data) }),
   updateCategoria: (id: number | string, data: any) =>
@@ -97,7 +148,7 @@ export const api = {
   deleteCategoria: (id: number | string) =>
     request(`/categorias/${id}`, { method: "DELETE" }),
 
-  getMarcas: () => request("/marcas"),
+  getMarcas: (params?: string) => request(`/marcas${params ? `?${params}` : ""}`),
   createMarca: (data: any) =>
     request("/marcas", { method: "POST", body: JSON.stringify(data) }),
   updateMarca: (id: number | string, data: any) =>
@@ -105,13 +156,13 @@ export const api = {
   deleteMarca: (id: number | string) =>
     request(`/marcas/${id}`, { method: "DELETE" }),
 
-  getFornecedores: () => request("/fornecedores"),
+  getFornecedores: (params?: string) => request(`/fornecedores${params ? `?${params}` : ""}`),
   createFornecedor: (data: any) =>
     request("/fornecedores", { method: "POST", body: JSON.stringify(data) }),
   deleteFornecedor: (id: number | string) =>
     request(`/fornecedores/${id}`, { method: "DELETE" }),
 
-  getSecretarias: () => request("/secretarias"),
+  getSecretarias: (params?: string) => request(`/secretarias${params ? `?${params}` : ""}`),
   createSecretaria: (data: any) =>
     request("/secretarias", { method: "POST", body: JSON.stringify(data) }),
   updateSecretaria: (id: number | string, data: any) =>
@@ -171,7 +222,25 @@ export const api = {
     request("/notificacoes", { method: "PATCH" }),
 
   // Pendencias
-  getPendencias: () => request("/pendencias"),
+  getPendencias: (params?: string) => request(`/pendencias${params ? `?${params}` : ""}`),
+
+  // Cadastros provisórios da unidade
+  getCadastrosProvisorios: (params?: string) => request(`/cadastros-provisorios${params ? `?${params}` : ""}`),
+  getCadastroProvisorio: (id: number | string) => request(`/cadastros-provisorios/${id}`),
+  createCadastroProvisorio: (data: any) =>
+    request("/cadastros-provisorios", { method: "POST", body: JSON.stringify(data) }),
+  updateCadastroProvisorio: (id: number | string, data: any) =>
+    request(`/cadastros-provisorios/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  getHistoricoCadastroProvisorio: (id: number | string) =>
+    request(`/cadastros-provisorios/${id}/historico`),
+  encaminharCadastroProvisorio: (id: number | string, observacao?: string) =>
+    request(`/cadastros-provisorios/${id}/encaminhar`, { method: "POST", body: JSON.stringify({ observacao }) }),
+  devolverCadastroProvisorio: (id: number | string, motivo: string) =>
+    request(`/cadastros-provisorios/${id}/devolver`, { method: "POST", body: JSON.stringify({ motivo }) }),
+  rejeitarCadastroProvisorio: (id: number | string, motivo: string) =>
+    request(`/cadastros-provisorios/${id}/rejeitar`, { method: "POST", body: JSON.stringify({ motivo }) }),
+  aprovarCadastroProvisorio: (id: number | string) =>
+    request(`/cadastros-provisorios/${id}/aprovar`, { method: "POST" }),
 
   // Relatorios
   getRelatorio: (tipo: string) => request(`/relatorios?tipo=${tipo}`),

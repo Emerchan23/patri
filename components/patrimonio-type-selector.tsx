@@ -167,7 +167,7 @@ export function PatrimonioTypeSelector({
           <div className="mt-4 flex items-start gap-2 rounded-lg bg-success/10 p-3">
             <CheckCircle2 className="h-4 w-4 text-success shrink-0 mt-0.5" />
             <p className="text-xs text-muted-foreground">
-              Voce devera informar o numero inicial e o sistema gerara a sequencia para os itens.
+              O numero inicial e opcional. Se deixar em branco, o sistema gera automaticamente a sequencia definitiva.
             </p>
           </div>
         )}

@@ -19,6 +19,7 @@ interface DatePickerProps {
   setDate: (date: Date | undefined) => void
   className?: string
   placeholder?: string
+  disabled?: boolean
 }
 
 export function DatePicker({
@@ -26,12 +27,14 @@ export function DatePicker({
   setDate,
   className,
   placeholder = "Selecione uma data",
+  disabled = false,
 }: DatePickerProps) {
   return (
     <Popover>
       <PopoverTrigger asChild>
         <Button
           variant={"outline"}
+          disabled={disabled}
           className={cn(
             "w-full justify-start text-left font-normal",
             !date && "text-muted-foreground",

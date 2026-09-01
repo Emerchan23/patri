@@ -1,19 +1,14 @@
 import { NextResponse } from "next/server"
 import { query, queryOne, execute } from "@/lib/db"
-import { getAuthUser } from "@/lib/auth-utils"
+import { withPermission } from "@/lib/api-auth"
 
 // GET /api/alienacoes/[id] - Detalhes da alienacao
-export async function GET(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export const GET = withPermission("gerenciarAlienacoes", async (
+  request,
+  { params }
+) => {
   try {
-    const user = await getAuthUser()
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    }
-
-    const { id } = await params
+    const id = params?.id
 
     // Buscar dados principais
     const alienacao = await queryOne<any>(
@@ -48,20 +43,15 @@ export async function GET(
     console.error("Erro ao buscar alienacao:", error)
     return NextResponse.json({ error: "Erro interno do servidor" }, { status: 500 })
   }
-}
+})
 
 // PUT /api/alienacoes/[id] - Atualizar alienacao
-export async function PUT(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export const PUT = withPermission("gerenciarAlienacoes", async (
+  request,
+  { user, params }
+) => {
   try {
-    const user = await getAuthUser()
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    }
-
-    const { id } = await params
+    const id = params?.id
     const body = await request.json()
     const {
       status,
@@ -147,20 +137,15 @@ export async function PUT(
     console.error("Erro ao atualizar alienacao:", error)
     return NextResponse.json({ error: "Erro interno do servidor" }, { status: 500 })
   }
-}
+})
 
 // DELETE /api/alienacoes/[id] - Excluir alienacao (apenas se aberto)
-export async function DELETE(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export const DELETE = withPermission("gerenciarAlienacoes", async (
+  request,
+  { params }
+) => {
   try {
-    const user = await getAuthUser()
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    }
-    
-    const { id } = await params
+    const id = params?.id
     
     // Verificar status
     const alienacao = await queryOne<any>("SELECT status FROM alienacoes WHERE id = ?", [id])
@@ -180,4 +165,4 @@ export async function DELETE(
     console.error("Erro ao excluir alienacao:", error)
     return NextResponse.json({ error: "Erro interno do servidor" }, { status: 500 })
   }
-}
+})

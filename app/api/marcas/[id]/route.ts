@@ -8,6 +8,10 @@ export const PUT = withAuth(async (request, { user, params }) => {
   const body = await request.json()
   
   const existing = await queryOne<{ nome: string }>("SELECT nome FROM marcas WHERE id = ?", [id])
+  
+  if (existing && existing.nome !== body.nome) {
+      await execute("UPDATE bens SET marca = ? WHERE marca = ?", [body.nome, existing.nome])
+  }
 
   await execute("UPDATE marcas SET nome=? WHERE id=?", [body.nome, id])
 
@@ -31,6 +35,22 @@ export const DELETE = withAuth(async (_request, { user, params }) => {
   const id = params?.id
 
   const existing = await queryOne<{ nome: string }>("SELECT nome FROM marcas WHERE id = ?", [id])
+
+  if (!existing) {
+    return NextResponse.json({ error: "Marca não encontrada." }, { status: 404 })
+  }
+
+  // Check for usage in Assets
+  const usage = await queryOne<{ count: number }>(
+    "SELECT COUNT(*) as count FROM bens WHERE marca = ?", 
+    [existing.nome]
+  )
+
+  if (usage && usage.count > 0) {
+    return NextResponse.json({ 
+      error: `Não é possível excluir a marca "${existing.nome}" pois ela está vinculada a ${usage.count} bem(ns). Remova o vínculo dos bens antes de excluir.` 
+    }, { status: 400 })
+  }
 
   await execute("DELETE FROM marcas WHERE id = ?", [id])
 

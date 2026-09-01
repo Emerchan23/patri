@@ -2,17 +2,38 @@
 import { NextResponse } from "next/server"
 import { queryOne } from "@/lib/db"
 import { withAuth } from "@/lib/api-auth"
+import { getTransferScopeClause } from "@/lib/asset-scope"
+import { ensureTermosResponsabilidadeSchema } from "@/lib/termos-responsabilidade-schema"
 
-export const GET = withAuth(async (request, { params }) => {
+export const GET = withAuth(async (request, { user, params }) => {
+  await ensureTermosResponsabilidadeSchema()
   const id = params?.id
-  
-  const loan = await queryOne<Record<string, unknown>>("SELECT * FROM emprestimos WHERE id = ?", [id])
+  const scope = getTransferScopeClause(user, {
+    fromSecretariaColumn: "origem_secretaria",
+    fromDepartamentoColumn: "origem_departamento",
+    toSecretariaColumn: "destino_secretaria",
+    toDepartamentoColumn: "destino_departamento",
+  })
+  const loan = await queryOne<Record<string, unknown>>(
+    `SELECT * FROM emprestimos WHERE id = ?${scope.clause ? ` AND (${scope.clause})` : ""}`,
+    [id, ...scope.params]
+  )
   
   if (!loan) {
     return NextResponse.json({ error: "Emprestimo nao encontrado" }, { status: 404 })
   }
   
-  return NextResponse.json(dbRowToLoan(loan))
+  const term = await queryOne<Record<string, unknown>>(
+    "SELECT * FROM termos_responsabilidade WHERE emprestimo_id = ?",
+    [id]
+  )
+  return NextResponse.json({ ...dbRowToLoan(loan), termo: term ? {
+    id: String(term.id),
+    status: term.status,
+    geradoEm: term.gerado_em,
+    assinadoEm: term.assinado_em,
+    arquivoAssinado: term.arquivo_assinado ? `/api/emprestimos/${id}/termo/arquivo` : null,
+  } : null })
 })
 
 function dbRowToLoan(row: Record<string, unknown>) {

@@ -1,12 +1,13 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import {
   Select,
   SelectContent,
@@ -34,40 +35,45 @@ import {
   Clock,
   CheckCircle2,
   Tag,
-  MapPin,
   User,
-  Package,
   Send,
   Printer,
   Search,
-  Building2,
   Calendar,
   ArrowRight,
   FileCheck,
   Save,
   ImageIcon,
+  X,
+  Loader2,
 } from "lucide-react"
 import {
-  getStatusLabel,
-  getStatusColor,
   getCategoryLabel,
-  formatCurrency,
   formatDate,
+  getEtiquetaStatusColor,
+  getEtiquetaStatusLabel,
   type PdfSettings,
 } from "@/lib/data"
 import type { Asset } from "@/lib/data"
-import { gerarRelatorioProvisorio } from "@/lib/pdf-generator"
-import { useAuth } from "@/lib/auth-context"
-import { api, fetcher } from "@/lib/api-client"
+import { gerarPdfApoioColagemEtiquetas, gerarRelatorioProvisorio } from "@/lib/pdf-generator"
+import { api, fetcher, getApiErrorMessage, isApiError } from "@/lib/api-client"
 import useSWR, { useSWRConfig } from "swr"
 import { useToast } from "@/components/ui/use-toast"
+import { PaginationControl } from "@/components/ui/pagination-control"
+import { useDebounce } from "@/hooks/use-debounce"
+import { useAuth } from "@/lib/auth-context"
 
 export function PendenciasPatrimonio() {
+  const { user } = useAuth()
   const { mutate } = useSWRConfig()
   const { toast } = useToast()
-  const { user } = useAuth()
   const [search, setSearch] = useState("")
+  const debouncedSearch = useDebounce(search, 400)
   const [secretariaFilter, setSecretariaFilter] = useState<string>("todos")
+  const [departamentoFilter, setDepartamentoFilter] = useState<string>("todos")
+  const [salaFilter, setSalaFilter] = useState<string>("todos")
+  const [page, setPage] = useState(1)
+  const limit = 20
   const [selectedItems, setSelectedItems] = useState<string[]>([])
   const [showAtribuirDialog, setShowAtribuirDialog] = useState(false)
   const [showAtribuirLoteDialog, setShowAtribuirLoteDialog] = useState(false)
@@ -76,80 +82,72 @@ export function PendenciasPatrimonio() {
   // const [batchPrefix, setBatchPrefix] = useState("PAT-2025-") // Removed prefix
   const [batchStartNumber, setBatchStartNumber] = useState("00500")
   const [saved, setSaved] = useState(false)
+  const [workflowLoadingId, setWorkflowLoadingId] = useState<string | null>(null)
+  const [showPdfApoioDialog, setShowPdfApoioDialog] = useState(false)
+  const [pdfApoioScope, setPdfApoioScope] = useState<"aguardando_colagem" | "todos_pendentes">("aguardando_colagem")
+  const [pdfApoioPatrimonioTipo, setPdfApoioPatrimonioTipo] = useState<"todos" | "provisorio" | "definitivo">("todos")
+  const [pdfApoioPrefixoProvisorio, setPdfApoioPrefixoProvisorio] = useState("todos")
+  const [pdfApoioSequenciaInicial, setPdfApoioSequenciaInicial] = useState("")
+  const [pdfApoioSequenciaFinal, setPdfApoioSequenciaFinal] = useState("")
+
+  const pendenciasParams = new URLSearchParams({
+    page: page.toString(),
+    limit: limit.toString(),
+  })
+  if (debouncedSearch) pendenciasParams.set("search", debouncedSearch)
+  if (secretariaFilter !== "todos") pendenciasParams.set("secretaria", secretariaFilter)
+  if (departamentoFilter !== "todos") pendenciasParams.set("departamento", departamentoFilter)
+  if (salaFilter !== "todos") pendenciasParams.set("sala", salaFilter)
+  const pendenciasUrl = `/pendencias?${pendenciasParams.toString()}`
 
   // Load data from API
-  const { data: bensResult } = useSWR("/bens?limit=1000", fetcher)
-  const { data: veiculos = [] } = useSWR<Asset[]>("/veiculos", fetcher)
+  const { data: pendenciasResult } = useSWR(pendenciasUrl, fetcher, {
+    keepPreviousData: true,
+  })
   const { data: pdfSettings } = useSWR<PdfSettings>("/configuracoes/pdf", fetcher)
+  const { data: secretariasData } = useSWR("/secretarias?all=true", fetcher)
+  const secretarias = (Array.isArray(secretariasData) ? secretariasData : (secretariasData?.data || [])) as any[]
 
-  // Handle API response structure (array or object with data property)
-  const bens = Array.isArray(bensResult) ? bensResult : (bensResult?.data || [])
-
-  // Combine and deduplicate assets to avoid key collisions
-  // Use a Map to ensure unique IDs
-  const assetsMap = new Map<string | number, Asset>()
-  
-  // Add bens first
-  bens.forEach((asset: Asset) => {
-    if (asset && asset.id) assetsMap.set(asset.id, asset)
-  })
-  
-  // Add veiculos (might overwrite if duplicates exist, which is fine)
-  if (Array.isArray(veiculos)) {
-    veiculos.forEach((asset: Asset) => {
-      if (asset && asset.id) assetsMap.set(asset.id, asset)
-    })
+  const assets = (pendenciasResult?.data || []) as Asset[]
+  const meta = pendenciasResult?.meta || { total: 0, page: 1, limit, totalPages: 1 }
+  const selectableAssets = assets.filter((asset) => asset.patrimonioTipo === "provisorio")
+  const waitingStats = pendenciasResult?.totals || {
+    total: 0,
+    menosDe30: 0,
+    entre30e60: 0,
+    maisDe60: 0,
   }
+  const allAssets = assets
+  const provisionalPrefixOptions = Array.from(
+    new Set(
+      allAssets
+        .map((asset) => {
+          const codigo = String(asset.patrimonio || asset.patrimonioProvisorio || "").trim().toUpperCase()
+          const match = codigo.match(/^(.*?)(\d+)$/)
+          if (!match) return null
+          return codigo.startsWith("PROV-") ? match[1] : null
+        })
+        .filter(Boolean) as string[]
+    )
+  ).sort()
 
-  const allAssets = Array.from(assetsMap.values())
-  
-  const provisorios = allAssets.filter((a) => 
-    a.patrimonioTipo === "provisorio" || 
-    !a.patrimonio || 
-    a.patrimonio.trim() === ""
+  const availableDepartamentos = secretarias.flatMap((sec: any) =>
+    secretariaFilter !== "todos" && sec.nome !== secretariaFilter ? [] : (sec.departamentos || [])
+  )
+  const availableSalas = availableDepartamentos.flatMap((dep: any) =>
+    departamentoFilter !== "todos" && dep.nome !== departamentoFilter ? [] : (dep.salas || [])
   )
 
-  const filtered = provisorios.filter((asset) => {
-    const matchSearch =
-      search === "" ||
-      asset.descricao.toLowerCase().includes(search.toLowerCase()) ||
-      (asset.patrimonio && asset.patrimonio.toLowerCase().includes(search.toLowerCase())) ||
-      (typeof asset.responsavel === 'object' && asset.responsavel?.nome.toLowerCase().includes(search.toLowerCase())) ||
-      (typeof asset.responsavel === 'string' && asset.responsavel.toLowerCase().includes(search.toLowerCase()))
-
-    const matchSecretaria =
-      secretariaFilter === "todos" || (asset.localizacao && asset.localizacao.secretaria.includes(secretariaFilter))
-
-    return matchSearch && matchSecretaria
-  })
-
-  // Group by secretaria
-  const bySecretaria = filtered.reduce(
-    (acc, asset) => {
-      const key = asset.localizacao.secretaria
-      if (!acc[key]) acc[key] = []
-      acc[key].push(asset)
-      return acc
-    },
-    {} as Record<string, Asset[]>
-  )
+  useEffect(() => {
+    setPage(1)
+    setSelectedItems([])
+  }, [debouncedSearch, secretariaFilter, departamentoFilter, salaFilter])
 
   const getDaysWaiting = (dateStr?: string) => {
     if (!dateStr) return 0
     return Math.floor(
       (Date.now() - new Date(dateStr).getTime()) / (1000 * 60 * 60 * 24)
     )
-  }
-
-  // Count by days waiting
-  const waitingStats = {
-    total: provisorios.length,
-    menosDe30: provisorios.filter((a) => getDaysWaiting(a.dataAquisicao) < 30).length,
-    entre30e60: provisorios.filter((a) => {
-      const days = getDaysWaiting(a.dataAquisicao)
-      return days >= 30 && days < 60
-    }).length,
-    maisDe60: provisorios.filter((a) => getDaysWaiting(a.dataAquisicao) >= 60).length,
   }
 
   const toggleItem = (id: string | number) => {
@@ -160,10 +158,10 @@ export function PendenciasPatrimonio() {
   }
 
   const toggleAll = () => {
-    if (selectedItems.length === filtered.length) {
+    if (selectedItems.length === selectableAssets.length) {
       setSelectedItems([])
     } else {
-      setSelectedItems(filtered.map((a) => String(a.id)))
+      setSelectedItems(selectableAssets.map((a) => String(a.id)))
     }
   }
 
@@ -194,6 +192,10 @@ export function PendenciasPatrimonio() {
         patrimonio: definitiveNumber,
         patrimonioTipo: "definitivo",
         numero_patrimonio: definitiveNumber,
+        etiquetaEnviadaEm: null,
+        etiquetaEnviadaPor: null,
+        etiquetaColadaEm: null,
+        etiquetaColadaPor: null,
       }
 
       if (selectedAsset.categoria === 'veiculo' || selectedAsset.categoria === 'Veiculo') {
@@ -202,20 +204,7 @@ export function PendenciasPatrimonio() {
         await api.updateBem(selectedAsset.id, updateData)
       }
       
-      // Optimistic update
-      await mutate("/bens?limit=1000", async (currentData: any) => {
-        // If it's an array
-        if (Array.isArray(currentData)) {
-            return currentData.map(b => b.id === selectedAsset.id ? { ...b, ...updateData } : b)
-        }
-        // If it's an object with data property
-        if (currentData?.data) {
-             return { ...currentData, data: currentData.data.map((b: any) => b.id === selectedAsset.id ? { ...b, ...updateData } : b) }
-        }
-        return currentData
-      }, { revalidate: true })
-      
-      mutate("/veiculos")
+      await mutate(pendenciasUrl)
 
       toast({
         title: "Sucesso",
@@ -233,7 +222,10 @@ export function PendenciasPatrimonio() {
       console.error("Erro ao atribuir patrimonio:", error)
       toast({
         title: "Erro ao salvar",
-        description: error instanceof Error ? error.message : "Não foi possível atribuir o patrimônio. Tente novamente.",
+        description:
+          isApiError(error) && error.status === 409
+            ? getApiErrorMessage(error, "O patrimônio informado já está em uso.")
+            : getApiErrorMessage(error, "Não foi possível atribuir o patrimônio. Tente novamente."),
         variant: "destructive",
       })
     }
@@ -284,6 +276,10 @@ export function PendenciasPatrimonio() {
           patrimonio: newPatrimonio,
           patrimonioTipo: "definitivo",
           numero_patrimonio: newPatrimonio,
+          etiquetaEnviadaEm: null,
+          etiquetaEnviadaPor: null,
+          etiquetaColadaEm: null,
+          etiquetaColadaPor: null,
         }
 
         if (asset.categoria === 'veiculo' || asset.categoria === 'Veiculo') {
@@ -294,33 +290,7 @@ export function PendenciasPatrimonio() {
 
       await Promise.all(updates)
       
-      // Optimistic update for batch
-      await mutate("/bens?limit=1000", async (currentData: any) => {
-          let newData = currentData
-          if (Array.isArray(currentData)) {
-              newData = [...currentData]
-              updatesToProcess.forEach(({ asset, newPatrimonio }) => {
-                 const idx = newData.findIndex((b: any) => b.id === asset.id)
-                 if (idx !== -1) {
-                     newData[idx] = { ...newData[idx], patrimonio: newPatrimonio, patrimonioTipo: "definitivo", numero_patrimonio: newPatrimonio }
-                 }
-              })
-              return newData
-          }
-          if (currentData?.data) {
-               const newDataList = [...currentData.data]
-               updatesToProcess.forEach(({ asset, newPatrimonio }) => {
-                 const idx = newDataList.findIndex((b: any) => b.id === asset.id)
-                 if (idx !== -1) {
-                     newDataList[idx] = { ...newDataList[idx], patrimonio: newPatrimonio, patrimonioTipo: "definitivo", numero_patrimonio: newPatrimonio }
-                 }
-               })
-               return { ...currentData, data: newDataList }
-          }
-          return currentData
-      }, { revalidate: true })
-      
-      mutate("/veiculos")
+      await mutate(pendenciasUrl)
       
       toast({
         title: "Sucesso",
@@ -337,7 +307,10 @@ export function PendenciasPatrimonio() {
       console.error("Erro ao atribuir lote:", error)
       toast({
         title: "Erro ao processar lote",
-        description: "Ocorreu um erro ao atribuir os patrimônios. Verifique o console.",
+        description:
+          isApiError(error) && error.status === 409
+            ? getApiErrorMessage(error, "Um dos patrimônios informados já está em uso.")
+            : getApiErrorMessage(error, "Não foi possível atribuir os patrimônios em lote."),
         variant: "destructive",
       })
     }
@@ -350,8 +323,61 @@ export function PendenciasPatrimonio() {
     return "text-destructive"
   }
 
-  const handleImprimirRelatorio = () => {
-    const dataParaRelatorio = filtered.map(asset => ({
+  const extractSequenceNumber = (patrimonio?: string) => {
+    const codigo = String(patrimonio || "").trim().toUpperCase()
+    const match = codigo.match(/(\d+)(?!.*\d)/)
+    return match ? Number(match[1]) : null
+  }
+
+  const extractSequencePrefix = (patrimonio?: string) => {
+    const codigo = String(patrimonio || "").trim().toUpperCase()
+    const match = codigo.match(/^(.*?)(\d+)$/)
+    return match ? match[1] : null
+  }
+
+  const handleEtiquetaWorkflow = async (
+    asset: Asset,
+    action: "marcar_enviada" | "reabrir_pendente"
+  ) => {
+    setWorkflowLoadingId(String(asset.id))
+    try {
+      await api.updateBemEtiquetaFluxo(asset.id, action)
+      await mutate(pendenciasUrl)
+      toast({
+        title: "Sucesso",
+        description:
+          action === "marcar_enviada"
+            ? "Etiqueta enviada para a unidade com sucesso."
+            : "Fluxo de etiqueta removido com sucesso.",
+      })
+    } catch (error) {
+      toast({
+        title: "Erro",
+        description: getApiErrorMessage(error, "Nao foi possivel atualizar o fluxo da etiqueta."),
+        variant: "destructive",
+      })
+    } finally {
+      setWorkflowLoadingId(null)
+    }
+  }
+
+  const buildPendenciasReportParams = (customLimit = 5000) => {
+    const params = new URLSearchParams({
+      page: "1",
+      limit: customLimit.toString(),
+    })
+    if (debouncedSearch) params.set("search", debouncedSearch)
+    if (secretariaFilter !== "todos") params.set("secretaria", secretariaFilter)
+    if (departamentoFilter !== "todos") params.set("departamento", departamentoFilter)
+    if (salaFilter !== "todos") params.set("sala", salaFilter)
+    return params
+  }
+
+  const handleImprimirRelatorio = async () => {
+    const reportResult = await api.getPendencias(buildPendenciasReportParams().toString())
+    const reportAssets = (reportResult?.data || []) as Asset[]
+
+    const dataParaRelatorio = reportAssets.map(asset => ({
       patrimonio: asset.patrimonio || "",
       descricao: asset.descricao,
       categoria: asset.categoria,
@@ -370,6 +396,116 @@ export function PendenciasPatrimonio() {
     })
   }
 
+  const handleGerarPdfApoio = async () => {
+    try {
+      const reportResult = await api.getPendencias(buildPendenciasReportParams().toString())
+      let reportAssets = ((reportResult?.data || []) as Asset[])
+
+      if (selectedItems.length > 0) {
+        const selectedIds = new Set(selectedItems.map(String))
+        reportAssets = reportAssets.filter((asset) => selectedIds.has(String(asset.id)))
+      }
+
+      if (pdfApoioScope === "aguardando_colagem") {
+        reportAssets = reportAssets.filter((asset) => asset.etiquetaStatus === "enviada")
+      }
+
+      if (pdfApoioPatrimonioTipo !== "todos") {
+        reportAssets = reportAssets.filter((asset) => asset.patrimonioTipo === pdfApoioPatrimonioTipo)
+      }
+
+      if (pdfApoioPatrimonioTipo === "provisorio" && pdfApoioPrefixoProvisorio !== "todos") {
+        reportAssets = reportAssets.filter((asset) => {
+          const codigo = String(asset.patrimonio || asset.patrimonioProvisorio || "").trim().toUpperCase()
+          return extractSequencePrefix(codigo) === pdfApoioPrefixoProvisorio
+        })
+      }
+
+      const rangeStart = pdfApoioSequenciaInicial.trim() ? Number(pdfApoioSequenciaInicial) : null
+      const rangeEnd = pdfApoioSequenciaFinal.trim() ? Number(pdfApoioSequenciaFinal) : null
+      const hasRange = rangeStart !== null || rangeEnd !== null
+
+      if (
+        (pdfApoioSequenciaInicial.trim() && !Number.isFinite(rangeStart)) ||
+        (pdfApoioSequenciaFinal.trim() && !Number.isFinite(rangeEnd))
+      ) {
+        toast({
+          title: "Sequencia invalida",
+          description: "Informe apenas numeros nos campos de sequencia inicial e final.",
+          variant: "destructive",
+        })
+        return
+      }
+
+      if (rangeStart !== null && rangeEnd !== null && rangeStart > rangeEnd) {
+        toast({
+          title: "Faixa invalida",
+          description: "A sequencia inicial nao pode ser maior que a sequencia final.",
+          variant: "destructive",
+        })
+        return
+      }
+
+      if (hasRange) {
+        reportAssets = reportAssets.filter((asset) => {
+          const codigo = String(asset.patrimonio || asset.patrimonioProvisorio || "").trim()
+          const sequence = extractSequenceNumber(codigo)
+          if (sequence === null) return false
+          if (rangeStart !== null && sequence < rangeStart) return false
+          if (rangeEnd !== null && sequence > rangeEnd) return false
+          return true
+        })
+      }
+
+      if (reportAssets.length === 0) {
+        toast({
+          title: "Nenhum item para o PDF",
+          description:
+            selectedItems.length > 0
+              ? "Os itens selecionados nao geraram nenhum resultado para este tipo de PDF."
+              : pdfApoioScope === "aguardando_colagem"
+                ? "Nao ha itens aguardando colagem com os filtros atuais."
+                : "Nao ha pendencias para gerar no PDF com os filtros e faixa informados.",
+          variant: "destructive",
+        })
+        return
+      }
+
+      gerarPdfApoioColagemEtiquetas(
+        reportAssets.map((asset) => ({
+          id: asset.id,
+          patrimonio: asset.patrimonio || asset.patrimonioProvisorio || "Sem patrimonio",
+          descricao: asset.descricao,
+          numeroSerie: asset.numeroSerie || asset.numero_serie,
+          marca: asset.marca,
+          modelo: asset.modelo,
+          imagem: asset.imagem,
+          etiquetaStatus: asset.etiquetaStatus,
+          localizacao: asset.localizacao,
+          responsavel:
+            typeof asset.responsavel === "string"
+              ? { nome: asset.responsavel }
+              : asset.responsavel || { nome: "Nao informado" },
+        })),
+        {
+          settings: pdfSettings,
+          secretaria: secretariaFilter !== "todos" ? secretariaFilter : undefined,
+          departamento: departamentoFilter !== "todos" ? departamentoFilter : undefined,
+          sala: salaFilter !== "todos" ? salaFilter : undefined,
+          somenteAguardandoColagem: pdfApoioScope === "aguardando_colagem",
+        }
+      )
+
+      setShowPdfApoioDialog(false)
+    } catch (error) {
+      toast({
+        title: "Erro ao gerar PDF",
+        description: getApiErrorMessage(error, "Nao foi possivel gerar o PDF de apoio a colagem."),
+        variant: "destructive",
+      })
+    }
+  }
+
   return (
     <div className="flex flex-col gap-6">
       {/* Header */}
@@ -379,7 +515,7 @@ export function PendenciasPatrimonio() {
             Pendencias de Patrimonio
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Bens aguardando numero de patrimonio definitivo da prefeitura
+              Acompanhe bens aguardando patrimonio definitivo ou colagem confirmada pela unidade
           </p>
         </div>
         <div className="flex gap-2">
@@ -399,6 +535,14 @@ export function PendenciasPatrimonio() {
           >
             <Printer className="h-4 w-4" />
             Imprimir Relatorio
+          </Button>
+          <Button
+            variant="outline"
+            className="gap-2 bg-transparent"
+            onClick={() => setShowPdfApoioDialog(true)}
+          >
+            <FileCheck className="h-4 w-4" />
+            PDF Apoio Colagem
           </Button>
         </div>
       </div>
@@ -501,7 +645,7 @@ export function PendenciasPatrimonio() {
       {/* Filters */}
       <Card>
         <CardContent className="p-4">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-end">
+          <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-[minmax(260px,1.4fr)_1fr_1fr_1fr]">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -511,20 +655,73 @@ export function PendenciasPatrimonio() {
                 onChange={(e) => setSearch(e.target.value)}
               />
             </div>
-            <Select value={secretariaFilter} onValueChange={setSecretariaFilter}>
-              <SelectTrigger className="w-52">
-                <Building2 className="h-4 w-4 mr-2 text-muted-foreground" />
-                <SelectValue placeholder="Secretaria" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="todos">Todas Secretarias</SelectItem>
-                <SelectItem value="Administracao">Sec. Administracao</SelectItem>
-                <SelectItem value="Educacao">Sec. Educacao</SelectItem>
-                <SelectItem value="Saude">Sec. Saude</SelectItem>
-                <SelectItem value="Obras">Sec. Obras</SelectItem>
-                <SelectItem value="Financas">Sec. Financas</SelectItem>
-              </SelectContent>
-            </Select>
+            <SearchableSelect
+              value={secretariaFilter}
+              onValueChange={(value) => {
+                setSecretariaFilter(value)
+                setDepartamentoFilter("todos")
+                setSalaFilter("todos")
+              }}
+              placeholder="Filtrar secretaria..."
+              searchPlaceholder="Buscar secretaria..."
+              items={[
+                { value: "todos", label: "Todas Secretarias" },
+                ...secretarias.map((s) => {
+                  const nome = s.nome.replace("Secretaria de ", "")
+                  return { value: s.nome, label: `Sec. ${nome}`, searchTerms: s.nome }
+                })
+              ]}
+            />
+            <SearchableSelect
+              value={departamentoFilter}
+              onValueChange={(value) => {
+                setDepartamentoFilter(value)
+                setSalaFilter("todos")
+              }}
+              placeholder="Todos os departamentos"
+              searchPlaceholder="Buscar departamento..."
+              items={[
+                { value: "todos", label: "Todos os Departamentos" },
+                ...availableDepartamentos.map((dep: any) => ({
+                  value: dep.nome,
+                  label: dep.nome,
+                  searchTerms: dep.nome,
+                })),
+              ]}
+            />
+            <SearchableSelect
+              value={salaFilter}
+              onValueChange={setSalaFilter}
+              placeholder="Todas as salas"
+              searchPlaceholder="Buscar sala..."
+              items={[
+                { value: "todos", label: "Todas as Salas" },
+                ...availableSalas.map((room: any) => {
+                  const name = typeof room === "string" ? room : room.nome
+                  return {
+                    value: name,
+                    label: name,
+                    searchTerms: name,
+                  }
+                }),
+              ]}
+            />
+            
+            {(search || secretariaFilter !== "todos" || departamentoFilter !== "todos" || salaFilter !== "todos") && (
+              <Button 
+                variant="outline" 
+                onClick={() => {
+                  setSearch("")
+                  setSecretariaFilter("todos")
+                  setDepartamentoFilter("todos")
+                  setSalaFilter("todos")
+                }}
+                className="h-10 gap-2 xl:col-span-4 xl:justify-self-start"
+              >
+                <X className="h-4 w-4" />
+                Limpar Filtros
+              </Button>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -534,13 +731,13 @@ export function PendenciasPatrimonio() {
         <CardHeader className="pb-0">
           <div className="flex items-center justify-between">
             <CardTitle className="text-base">
-              {filtered.length} bens pendentes
+              {meta.total} bens pendentes
             </CardTitle>
-            {filtered.length > 0 && (
+            {assets.length > 0 && (
               <Button variant="ghost" size="sm" className="text-xs" onClick={toggleAll}>
-                {selectedItems.length === filtered.length
+                {selectedItems.length === selectableAssets.length
                   ? "Desmarcar Todos"
-                  : "Selecionar Todos"}
+                  : "Selecionar Todos Provisorios"}
               </Button>
             )}
           </div>
@@ -552,18 +749,20 @@ export function PendenciasPatrimonio() {
                 <TableRow>
                   <TableHead className="w-10" />
                   <TableHead className="w-[60px]">Foto</TableHead>
-                  <TableHead>Prov. Patrimonio</TableHead>
+                  <TableHead>Patrimonio</TableHead>
                   <TableHead>Descricao</TableHead>
                   <TableHead className="hidden md:table-cell">Categoria</TableHead>
                   <TableHead className="hidden lg:table-cell">Unidade</TableHead>
                   <TableHead className="hidden md:table-cell">Responsavel</TableHead>
+                  <TableHead>Etapa</TableHead>
                   <TableHead>Dias Aguardando</TableHead>
                   <TableHead className="text-right">Acoes</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((asset) => {
+                {assets.map((asset) => {
                   const days = getDaysWaiting(asset.dataAquisicao)
+                  const isProvisional = asset.patrimonioTipo === "provisorio"
                   return (
                     <TableRow
                       key={asset.id}
@@ -572,6 +771,7 @@ export function PendenciasPatrimonio() {
                       <TableCell>
                         <Checkbox
                           checked={selectedItems.includes(String(asset.id))}
+                          disabled={!isProvisional}
                           onCheckedChange={() => toggleItem(asset.id)}
                         />
                       </TableCell>
@@ -628,6 +828,17 @@ export function PendenciasPatrimonio() {
                         <span className="text-sm">{typeof asset.responsavel === 'object' ? asset.responsavel.nome : asset.responsavel}</span>
                       </TableCell>
                       <TableCell>
+                        {asset.etiquetaStatus ? (
+                          <Badge variant="outline" className={`text-[10px] ${getEtiquetaStatusColor(asset.etiquetaStatus)}`}>
+                            {getEtiquetaStatusLabel(asset.etiquetaStatus)}
+                          </Badge>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">
+                            {isProvisional ? "Aguardando definitivo" : "-"}
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell>
                         <div className="flex items-center gap-1.5">
                           <span className={`text-sm font-bold ${getDaysColor(days)}`}>
                             {days}d
@@ -636,25 +847,40 @@ export function PendenciasPatrimonio() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-1">
-                          <Button
-                            size="sm"
-                            className="h-8 gap-1.5 text-xs"
-                            onClick={() => {
-                              setSelectedAsset(asset)
-                              setShowAtribuirDialog(true)
-                            }}
-                          >
-                            <Tag className="h-3.5 w-3.5" />
-                            Atribuir
-                          </Button>
+                          {isProvisional ? (
+                            <Button
+                              size="sm"
+                              className="h-8 gap-1.5 text-xs"
+                              onClick={() => {
+                                setSelectedAsset(asset)
+                                setShowAtribuirDialog(true)
+                              }}
+                            >
+                              <Tag className="h-3.5 w-3.5" />
+                              Atribuir
+                            </Button>
+                          ) : asset.etiquetaStatus === "enviada" && (user?.role === "gestor" || user?.role === "administrador") ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-8 gap-1.5 text-xs"
+                              onClick={() => handleEtiquetaWorkflow(asset, "reabrir_pendente")}
+                              disabled={workflowLoadingId === String(asset.id)}
+                            >
+                              {workflowLoadingId === String(asset.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Clock className="h-3.5 w-3.5" />}
+                              Reabrir
+                            </Button>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">Aguardando unidade</span>
+                          )}
                         </div>
                       </TableCell>
                     </TableRow>
                   )
                 })}
-                {filtered.length === 0 && (
+                {assets.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={8} className="text-center py-12">
+                    <TableCell colSpan={10} className="text-center py-12">
                       <div className="flex flex-col items-center gap-2">
                         <CheckCircle2 className="h-8 w-8 text-success" />
                         <p className="text-sm font-medium text-success">
@@ -670,10 +896,151 @@ export function PendenciasPatrimonio() {
               </TableBody>
             </Table>
           </div>
+          <div className="border-t px-4 py-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs text-muted-foreground">
+                Pagina {meta.page} de {meta.totalPages} • {meta.total} registro(s)
+              </p>
+              <PaginationControl
+                currentPage={meta.page}
+                totalPages={meta.totalPages}
+                onPageChange={(nextPage) => {
+                  setSelectedItems([])
+                  setPage(nextPage)
+                }}
+              />
+            </div>
+          </div>
         </CardContent>
       </Card>
 
       {/* Individual assign dialog */}
+      <Dialog open={showPdfApoioDialog} onOpenChange={setShowPdfApoioDialog}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>PDF de Apoio a Colagem</DialogTitle>
+            <DialogDescription>
+              Gere uma folha operacional para conferir patrimonio, numero de serie e localizacao antes de colar as etiquetas.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-4">
+            <div className="rounded-lg border bg-muted/30 p-4 text-sm">
+              <p className="font-medium">O que vai entrar no PDF?</p>
+              <p className="mt-1 text-muted-foreground">
+                Os filtros atuais de secretaria, departamento, sala e busca serao respeitados.
+              </p>
+              {selectedItems.length > 0 && (
+                <p className="mt-2 text-xs text-primary">
+                  Itens selecionados na tabela serao priorizados nesta geracao.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="pdf-apoio-scope">Tipo do PDF</Label>
+              <Select
+                value={pdfApoioScope}
+                onValueChange={(value: "aguardando_colagem" | "todos_pendentes") => setPdfApoioScope(value)}
+              >
+                <SelectTrigger id="pdf-apoio-scope">
+                  <SelectValue placeholder="Selecione o tipo do PDF" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="aguardando_colagem">So Aguardando Colagem</SelectItem>
+                  <SelectItem value="todos_pendentes">Todos os Pendentes Filtrados</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="pdf-apoio-patrimonio-tipo">Patrimonio</Label>
+                <Select
+                  value={pdfApoioPatrimonioTipo}
+                  onValueChange={(value: "todos" | "provisorio" | "definitivo") => {
+                    setPdfApoioPatrimonioTipo(value)
+                    if (value !== "provisorio") {
+                      setPdfApoioPrefixoProvisorio("todos")
+                    }
+                  }}
+                >
+                  <SelectTrigger id="pdf-apoio-patrimonio-tipo">
+                    <SelectValue placeholder="Tipo do patrimonio" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="todos">Todos</SelectItem>
+                    <SelectItem value="provisorio">Provisorio</SelectItem>
+                    <SelectItem value="definitivo">Permanente / Definitivo</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {pdfApoioPatrimonioTipo === "provisorio" && (
+                <div className="space-y-2">
+                  <Label htmlFor="pdf-apoio-prefixo">Prefixo Provisorio</Label>
+                  <Select
+                    value={pdfApoioPrefixoProvisorio}
+                    onValueChange={setPdfApoioPrefixoProvisorio}
+                  >
+                    <SelectTrigger id="pdf-apoio-prefixo">
+                      <SelectValue placeholder="Selecione o prefixo" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="todos">Todos os prefixos PROV</SelectItem>
+                      {provisionalPrefixOptions.map((prefixo) => (
+                        <SelectItem key={prefixo} value={prefixo}>
+                          {prefixo}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="pdf-apoio-sequencia-inicial">Sequencia inicial</Label>
+                <Input
+                  id="pdf-apoio-sequencia-inicial"
+                  inputMode="numeric"
+                  placeholder={pdfApoioPatrimonioTipo === "provisorio" ? "Ex.: 331" : "Ex.: 1001"}
+                  value={pdfApoioSequenciaInicial}
+                  onChange={(e) => setPdfApoioSequenciaInicial(e.target.value.replace(/\D/g, ""))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pdf-apoio-sequencia-final">Sequencia final</Label>
+                <Input
+                  id="pdf-apoio-sequencia-final"
+                  inputMode="numeric"
+                  placeholder={pdfApoioPatrimonioTipo === "provisorio" ? "Ex.: 360" : "Ex.: 1050"}
+                  value={pdfApoioSequenciaFinal}
+                  onChange={(e) => setPdfApoioSequenciaFinal(e.target.value.replace(/\D/g, ""))}
+                />
+              </div>
+            </div>
+
+            <div className="rounded-lg bg-info/10 p-3 text-xs text-muted-foreground">
+              O PDF destaca numero de serie, marca/modelo, localizacao, responsavel e foto quando existir.
+              Se voce filtrar patrimonio provisorio, pode escolher o prefixo do ano, como PROV-2025-, PROV-2026- ou PROV-2027-,
+              e ainda limitar pela faixa numerica inicial/final.
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setShowPdfApoioDialog(false)}>
+                Cancelar
+              </Button>
+              <Button className="gap-2" onClick={handleGerarPdfApoio}>
+                <Printer className="h-4 w-4" />
+                Gerar PDF
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog
         open={showAtribuirDialog}
         onOpenChange={(open) => {
@@ -747,7 +1114,7 @@ export function PendenciasPatrimonio() {
                   className="font-mono"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Digite o numero oficial recebido da prefeitura para gerar a etiqueta
+                  Digite o numero oficial recebido da prefeitura para concluir a regularizacao do patrimonio
                 </p>
               </div>
 
@@ -755,8 +1122,8 @@ export function PendenciasPatrimonio() {
               <div className="flex items-center gap-2 rounded-lg bg-info/10 p-3">
                 <Send className="h-4 w-4 text-info shrink-0" />
                 <p className="text-xs text-muted-foreground">
-                  Apos confirmar, a etiqueta sera disponibilizada para o assistente da unidade
-                  ({selectedAsset.localizacao.departamento}) colar no equipamento.
+                  Apos confirmar, o bem fica definitivo. O fluxo de etiqueta so deve ser iniciado depois,
+                  se voce realmente precisar enviar a etiqueta para a unidade.
                 </p>
               </div>
 
@@ -783,7 +1150,7 @@ export function PendenciasPatrimonio() {
                   onClick={handleAtribuirIndividual}
                 >
                   <FileCheck className="h-4 w-4" />
-                  Confirmar e Gerar Etiqueta
+                  Confirmar Patrimonio Definitivo
                 </Button>
               </div>
             </div>

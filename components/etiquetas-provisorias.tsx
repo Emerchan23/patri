@@ -24,6 +24,22 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog"
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion"
+import {
   Table,
   TableBody,
   TableCell,
@@ -35,6 +51,7 @@ import {
   Tag,
   Printer,
   Plus,
+  Save,
   Trash2,
   Eye,
   Settings2,
@@ -66,11 +83,55 @@ function generateProvNumber(ano: string, seq: number): string {
   return `PROV-${ano}-${String(seq).padStart(5, "0")}`
 }
 
+function normalizeLabelText(value?: string) {
+  return (value || "").replace(/\s+/g, " ").trim()
+}
+
+function fitTextWithEllipsis(
+  doc: { getTextWidth: (text: string) => number },
+  text: string,
+  maxWidth: number
+) {
+  const normalized = normalizeLabelText(text)
+  if (!normalized) return ""
+  if (doc.getTextWidth(normalized) <= maxWidth) return normalized
+
+  let trimmed = normalized
+  while (trimmed.length > 1 && doc.getTextWidth(`${trimmed}...`) > maxWidth) {
+    trimmed = trimmed.slice(0, -1).trimEnd()
+  }
+
+  return `${trimmed}...`
+}
+
+function splitLabelTextLines(
+  doc: { splitTextToSize: (text: string, size: number) => string[]; getTextWidth: (text: string) => number },
+  text: string,
+  maxWidth: number,
+  maxLines: number
+) {
+  const normalized = normalizeLabelText(text)
+  if (!normalized) return []
+
+  const rawLines = doc
+    .splitTextToSize(normalized, maxWidth)
+    .map((line) => normalizeLabelText(String(line)))
+    .filter(Boolean)
+
+  if (rawLines.length <= maxLines) return rawLines
+
+  const clipped = rawLines.slice(0, maxLines)
+  clipped[maxLines - 1] = fitTextWithEllipsis(doc, clipped[maxLines - 1], maxWidth)
+  return clipped
+}
+
 interface LabelItem {
   id: string
   numero: string
   descricao: string
   assetId?: string | number
+  loteId?: number
+  emenda?: string
   localizacao?: {
     departamento: string
     sala: string
@@ -94,6 +155,57 @@ interface Secretaria {
   departamentos: Departamento[]
 }
 
+interface LoteReserva {
+  id: number
+  ano: string
+  quantidade: number
+  origem_reserva?: "automatico" | "faixa_manual"
+  faixa_inicial: string
+  faixa_final: string
+  status: string
+  observacao?: string
+  emenda_parlamentar?: string
+  criado_por_nome?: string
+  criado_em: string
+  usadas: number
+  pendentes: number
+  reutilizaveis: number
+}
+
+interface FaixaLivre {
+  id: number
+  ano: string
+  seq_inicial: number
+  seq_final: number
+  quantidade_registrada: number
+  observacao?: string | null
+  criado_por_nome?: string | null
+  criado_em: string
+}
+
+interface RealignSummary {
+  nextSeq: number
+  formatted: string
+  source: string
+  gapsDetected: number
+  reusableCount: number
+}
+
+interface ZebraPrintConfig {
+  title: string
+  subtitle: string
+  showDescription: boolean
+  showEmenda: boolean
+  showLocation: boolean
+  showFooter: boolean
+  qrSizeMm: number
+  offsetXMm: number
+  offsetYMm: number
+  offsetColuna2Mm: number
+  alturaExtraMm: number
+  innerPaddingMm: number
+}
+
 export function EtiquetasProvisoriasGenerator() {
   const { toast } = useToast()
   
@@ -110,7 +222,8 @@ export function EtiquetasProvisoriasGenerator() {
   const [sala, setSala] = useState<string>("")
 
   // Fetch locations
-  const { data: secretarias = [] } = useSWR<Secretaria[]>("/secretarias", fetcher)
+  const { data: secretariasData } = useSWR("/secretarias?all=true", fetcher)
+  const secretarias = (Array.isArray(secretariasData) ? secretariasData : (secretariasData?.data || [])) as Secretaria[]
 
   // Helper to find selected location objects
   const selectedSecretaria = secretarias.find(s => s.nome === secretaria)
@@ -154,8 +267,25 @@ export function EtiquetasProvisoriasGenerator() {
   const [ano, setAno] = useState(currentYear)
   const [nextSeq, setNextSeq] = useState(1)
   const [nextSeqFormatted, setNextSeqFormatted] = useState("")
+  const [manualNextSeq, setManualNextSeq] = useState("")
+  const [sequenceSource, setSequenceSource] = useState<string>("sequencia_normal")
   const [columns, setColumns] = useState<string>("2")
   const [labels, setLabels] = useState<LabelItem[]>([])
+  const [savingSettings, setSavingSettings] = useState(false)
+  const [zebraConfig, setZebraConfig] = useState<ZebraPrintConfig>({
+    title: "",
+    subtitle: "",
+    showDescription: true,
+    showEmenda: true,
+    showLocation: false,
+    showFooter: true,
+    qrSizeMm: 16,
+    offsetXMm: 0,
+    offsetYMm: 1,
+    offsetColuna2Mm: 3,
+    alturaExtraMm: 20,
+    innerPaddingMm: 1.5,
+  })
   
   // Customization settings
   const [customTitle, setCustomTitle] = useState("")
@@ -183,12 +313,36 @@ export function EtiquetasProvisoriasGenerator() {
   const [selectedAssets, setSelectedAssets] = useState<Asset[]>([])
   
   const [showPreview, setShowPreview] = useState(false)
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false)
   const [isBatchDialogOpen, setIsBatchDialogOpen] = useState(false)
+  const [isGapDialogOpen, setIsGapDialogOpen] = useState(false)
+  const [isManualDialogOpen, setIsManualDialogOpen] = useState(false)
+  const [isRealignDialogOpen, setIsRealignDialogOpen] = useState(false)
+  const [lotPendingCancellation, setLotPendingCancellation] = useState<LoteReserva | null>(null)
+  const [batchMode, setBatchMode] = useState<"automatico" | "faixa">("automatico")
+  const [batchRangeMode, setBatchRangeMode] = useState<"quantidade" | "final">("quantidade")
   const [batchQuantity, setBatchQuantity] = useState(10)
+  const [batchRangeStart, setBatchRangeStart] = useState("")
+  const [batchRangeEnd, setBatchRangeEnd] = useState("")
+  const [batchObservation, setBatchObservation] = useState("")
+  const [batchEmenda, setBatchEmenda] = useState("")
+  const [manualDescricao, setManualDescricao] = useState("")
+  const [manualEmenda, setManualEmenda] = useState("")
+  const [gapStart, setGapStart] = useState("")
+  const [gapEnd, setGapEnd] = useState("")
+  const [gapObservation, setGapObservation] = useState("")
+  const [realignSummary, setRealignSummary] = useState<RealignSummary | null>(null)
+  const [lotStatusFilter, setLotStatusFilter] = useState("pendentes")
+  const [loadingLotId, setLoadingLotId] = useState<number | null>(null)
   
   // Track printed labels (by label number)
   const [printedLabels, setPrintedLabels] = useState<string[]>([])
   const [hidePrinted, setHidePrinted] = useState(false)
+  const lotsUrl = lotStatusFilter === "todos" ? "/etiquetas-provisorias" : `/etiquetas-provisorias?status=${lotStatusFilter}`
+  const { data: lotesResult, mutate: mutateLotes } = useSWR(lotsUrl, fetcher)
+  const lotes = (lotesResult?.data || []) as LoteReserva[]
+  const { data: settingsResult, mutate: mutateSettings } = useSWR(`/etiquetas-provisorias/settings?ano=${ano}`, fetcher)
+  const faixasLivres = (settingsResult?.faixasLivres || []) as FaixaLivre[]
 
   // Load printed labels from localStorage
   useEffect(() => {
@@ -207,6 +361,38 @@ export function EtiquetasProvisoriasGenerator() {
     localStorage.setItem("printedLabels", JSON.stringify(printedLabels))
   }, [printedLabels])
 
+  useEffect(() => {
+    if (!settingsResult) return
+    if (settingsResult.sequence) {
+      setNextSeq(settingsResult.sequence.nextSeq || 1)
+      setNextSeqFormatted(settingsResult.sequence.formatted || "")
+      setSequenceSource(settingsResult.sequence.source || "sequencia_normal")
+      setManualNextSeq(settingsResult.sequence.manualSetting ? String(settingsResult.sequence.manualSetting) : "")
+    }
+    if (settingsResult.printConfig) {
+      setZebraConfig({
+        title: String(settingsResult.layoutConfig?.title ?? settingsResult.printConfig.title ?? ""),
+        subtitle: String(settingsResult.layoutConfig?.subtitle ?? settingsResult.printConfig.subtitle ?? ""),
+        showDescription: Boolean(settingsResult.layoutConfig?.showDescription ?? true),
+        showEmenda: Boolean(settingsResult.layoutConfig?.showEmenda ?? true),
+        showLocation: Boolean(settingsResult.layoutConfig?.showLocation ?? false),
+        showFooter: Boolean(settingsResult.layoutConfig?.showFooter ?? true),
+        qrSizeMm: Number(settingsResult.layoutConfig?.qrSizeMm ?? 16),
+        offsetXMm: Number(settingsResult.printConfig.offsetXMm ?? 0),
+        offsetYMm: Number(settingsResult.printConfig.offsetYMm ?? 1),
+        offsetColuna2Mm: Number(settingsResult.printConfig.offsetColuna2Mm ?? 3),
+        alturaExtraMm: Number(settingsResult.printConfig.alturaExtraMm ?? 20),
+        innerPaddingMm: Number(settingsResult.printConfig.innerPaddingMm ?? 1.5),
+      })
+      if (settingsResult.layoutConfig?.title !== undefined) {
+        setCustomTitle(String(settingsResult.layoutConfig.title || ""))
+      }
+      if (settingsResult.layoutConfig?.showLocation !== undefined) {
+        setShowLocation(Boolean(settingsResult.layoutConfig.showLocation))
+      }
+    }
+  }, [settingsResult])
+
   // Fetch next sequence when year changes
   useEffect(() => {
     const fetchNextSeq = async () => {
@@ -216,13 +402,16 @@ export function EtiquetasProvisoriasGenerator() {
             if (data.nextSeq) {
                 setNextSeq(data.nextSeq)
                 setNextSeqFormatted(data.formatted)
+                setSequenceSource(data.source || "sequencia_normal")
             }
         } catch (e) {
             console.error("Failed to fetch next sequence", e)
         }
     }
-    fetchNextSeq()
-  }, [ano, isBatchDialogOpen]) // Refresh when dialog opens too
+    if (!settingsResult) {
+      fetchNextSeq()
+    }
+  }, [ano, isBatchDialogOpen, settingsResult]) // Refresh when dialog opens too
 
   // Removed old client-side calculation effect since we now use backend logic
   // but we keep the state to allow manual override
@@ -261,6 +450,7 @@ export function EtiquetasProvisoriasGenerator() {
         numero: numero,
         descricao: asset.descricao,
         assetId: asset.id,
+        emenda: asset.emendaParlamentar,
         localizacao: {
             departamento: asset.localizacao?.departamento || "",
             sala: asset.localizacao?.sala || ""
@@ -285,72 +475,314 @@ export function EtiquetasProvisoriasGenerator() {
       {
         id: `label-manual-${Date.now()}`,
         numero: num,
-        descricao: "",
+        descricao: manualDescricao.trim(),
+        emenda: manualEmenda.trim() || undefined,
       },
     ])
     setNextSeq(nextSeq + 1)
+    setManualDescricao("")
+    setManualEmenda("")
+    setIsManualDialogOpen(false)
     toast({
       title: "Sucesso",
       description: "Etiqueta manual adicionada.",
     })
-  }, [ano, nextSeq])
+  }, [ano, nextSeq, manualDescricao, manualEmenda])
+
+  const parsedRangeStart = Number(batchRangeStart)
+  const parsedRangeEnd = Number(batchRangeEnd)
+  const isRangeByQuantity = batchRangeMode === "quantidade"
+  const calculatedRangeStart = parsedRangeStart > 0 ? parsedRangeStart : 0
+  const calculatedRangeQuantity = batchMode === "faixa"
+    ? (isRangeByQuantity
+        ? Math.max(0, batchQuantity)
+        : (parsedRangeStart > 0 && parsedRangeEnd >= parsedRangeStart ? parsedRangeEnd - parsedRangeStart + 1 : 0))
+    : batchQuantity
+  const calculatedRangeEnd = batchMode === "faixa"
+    ? (parsedRangeStart > 0
+        ? (isRangeByQuantity
+            ? parsedRangeStart + Math.max(0, batchQuantity) - 1
+            : parsedRangeEnd)
+        : 0)
+    : nextSeq + batchQuantity - 1
 
   const handleBatchGenerate = async () => {
-    if (batchQuantity <= 0) {
-      toast({
-        title: "Quantidade invalida",
-        description: "A quantidade deve ser maior que zero.",
-        variant: "destructive",
-      })
-      return
+    if (batchMode === "automatico") {
+      if (batchQuantity <= 0) {
+        toast({
+          title: "Quantidade invalida",
+          description: "A quantidade deve ser maior que zero.",
+          variant: "destructive",
+        })
+        return
+      }
+    } else {
+      if (!calculatedRangeStart || calculatedRangeStart < 1) {
+        toast({
+          title: "Faixa invalida",
+          description: "Informe um numero inicial valido para a faixa.",
+          variant: "destructive",
+        })
+        return
+      }
+      if (!calculatedRangeQuantity || calculatedRangeQuantity < 1 || !calculatedRangeEnd || calculatedRangeEnd < calculatedRangeStart) {
+        toast({
+          title: "Faixa invalida",
+          description: "Informe uma faixa valida para reservar.",
+          variant: "destructive",
+        })
+        return
+      }
     }
 
     setIsGenerating(true)
     try {
+      const payload = batchMode === "automatico"
+        ? {
+            mode: "automatico",
+            quantidade: batchQuantity,
+            ano,
+            observacao: batchObservation,
+            emendaParlamentar: batchEmenda,
+          }
+        : {
+            mode: "faixa",
+            ano,
+            seqInicial: calculatedRangeStart,
+            observacao: batchObservation,
+            emendaParlamentar: batchEmenda,
+            strict: true,
+            ...(isRangeByQuantity
+              ? { quantidade: batchQuantity }
+              : { seqFinal: calculatedRangeEnd }),
+          }
+
       const response = await fetch("/api/etiquetas-provisorias", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          quantidade: batchQuantity,
-          ano: ano
-        }),
+        body: JSON.stringify(payload),
       })
 
       if (!response.ok) {
-        throw new Error("Erro ao gerar etiquetas")
+        const errorData = await response.json().catch(() => ({}))
+        if (response.status === 409 && Array.isArray(errorData.conflitos) && errorData.conflitos.length > 0) {
+          const preview = errorData.conflitos.slice(0, 3).map((item: { codigo: string }) => item.codigo).join(", ")
+          throw new Error(`A faixa escolhida possui conflitos: ${preview}${errorData.conflitos.length > 3 ? "..." : ""}`)
+        }
+        throw new Error(errorData.error || "Erro ao gerar etiquetas")
       }
 
       const data = await response.json()
-      
-      const newLabels: LabelItem[] = []
-      let seq = nextSeq // This is purely for display if needed, but we use server response
-      
-      data.tags.forEach((tagCode: string, index: number) => {
-        newLabels.push({
-          id: `label-batch-${Date.now()}-${index}`,
-          numero: tagCode,
-          descricao: "",
-        })
-      })
-
-      setLabels((prev) => [...prev, ...newLabels])
       setIsBatchDialogOpen(false)
+      setBatchMode("automatico")
+      setBatchRangeMode("quantidade")
+      setBatchRangeStart("")
+      setBatchRangeEnd("")
+      setBatchObservation("")
+      setBatchEmenda("")
+      mutateLotes()
+      mutateSettings()
       
       toast({
         title: "Sucesso",
-        description: `${data.count} etiquetas geradas e salvas com sucesso!`,
+        description: `${data.countReservadas || data.count} etiquetas reservadas com sucesso${data.faixaInicial && data.faixaFinal ? ` (${data.faixaInicial} ate ${data.faixaFinal})` : ""}. Use "Adicionar a impressao" quando quiser imprimir esse lote.`,
+      })
+    } catch (error: any) {
+      console.error(error)
+      toast({
+        title: "Erro",
+        description: error.message || "Nao foi possivel gerar as etiquetas. Tente novamente.",
+        variant: "destructive",
+      })
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  const handleCancelLot = async (loteId: number) => {
+    try {
+      const response = await fetch("/api/etiquetas-provisorias", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ loteId, action: "cancelar_saldo" }),
+      })
+
+      if (!response.ok) throw new Error("Erro ao atualizar lote")
+      await mutateLotes()
+      await mutateSettings()
+      setLabels((prev) => prev.filter((label) => label.loteId !== loteId))
+      toast({
+        title: "Lote atualizado",
+        description: "Saldo nao usado liberado para reuso com historico preservado.",
       })
     } catch (error) {
       console.error(error)
       toast({
         title: "Erro",
-        description: "Nao foi possivel gerar as etiquetas. Tente novamente.",
+        description: "Nao foi possivel atualizar o lote.",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const handleAddLotToPrint = async (lote: LoteReserva) => {
+    setLoadingLotId(lote.id)
+    try {
+      const response = await fetch(`/api/etiquetas-provisorias?loteId=${lote.id}`)
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data.error || "Nao foi possivel carregar as etiquetas do lote.")
+      }
+
+      const lotTags = Array.isArray(data.data) ? data.data : []
+      const existingCodes = new Set(labels.map((label) => label.numero))
+      const newLabels = lotTags
+        .filter((tag: { codigo: string }) => !existingCodes.has(tag.codigo))
+        .map((tag: { id: number; codigo: string; observacao?: string | null; emenda_parlamentar?: string | null }) => ({
+          id: `label-lote-${lote.id}-${tag.id}`,
+          loteId: lote.id,
+          numero: tag.codigo,
+          descricao: tag.observacao || "",
+          emenda: tag.emenda_parlamentar || lote.emenda_parlamentar || undefined,
+        })) as LabelItem[]
+
+      if (newLabels.length === 0) {
+        toast({
+          title: "Fila ja atualizada",
+          description: "As etiquetas pendentes desse lote ja estao na fila de impressao atual.",
+        })
+        return
+      }
+
+      setLabels((prev) => [...prev, ...newLabels])
+      toast({
+        title: "Lote adicionado a impressao",
+        description: `${newLabels.length} etiqueta(s) pendente(s) adicionada(s) a fila de impressao.`,
+      })
+    } catch (error: any) {
+      console.error(error)
+      toast({
+        title: "Erro",
+        description: error.message || "Nao foi possivel adicionar o lote a impressao.",
         variant: "destructive",
       })
     } finally {
-      setIsGenerating(false)
+      setLoadingLotId(null)
+    }
+  }
+
+  const handleSaveSettings = async () => {
+    setSavingSettings(true)
+    try {
+      const response = await fetch("/api/etiquetas-provisorias/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          preset: "patrimonio_provisorio",
+          ano,
+          proximoNumeroManual: manualNextSeq ? Number(manualNextSeq) : null,
+          layoutConfig: {
+            ...zebraConfig,
+            title: customTitle,
+            showLocation,
+          },
+        }),
+      })
+
+      if (!response.ok) throw new Error("Erro ao salvar configuracoes")
+      await mutateSettings()
+      toast({
+        title: "Configuracoes salvas",
+        description: "Sequencia manual e preset global da Zebra foram atualizados.",
+      })
+    } catch (error) {
+      console.error(error)
+      toast({
+        title: "Erro",
+        description: "Nao foi possivel salvar as configuracoes das etiquetas.",
+        variant: "destructive",
+      })
+    } finally {
+      setSavingSettings(false)
+    }
+  }
+
+  const handleRegisterGapRange = async () => {
+    const seqInicial = Number(gapStart)
+    const seqFinal = Number(gapEnd)
+    if (!seqInicial || !seqFinal || seqInicial < 1 || seqFinal < seqInicial) {
+      toast({
+        title: "Faixa invalida",
+        description: "Informe um numero inicial e final validos para a faixa livre.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    try {
+      const response = await fetch("/api/etiquetas-provisorias", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "registrar_faixa_livre",
+          ano,
+          seqInicial,
+          seqFinal,
+          observacao: gapObservation,
+        }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || "Erro ao registrar faixa livre")
+
+      setGapStart("")
+      setGapEnd("")
+      setGapObservation("")
+      setIsGapDialogOpen(false)
+      await mutateSettings()
+      toast({
+        title: "Faixa livre registrada",
+        description: `${data.inserted || 0} numero(s) adicionados, ${data.updated || 0} reaproveitados e ${data.skipped || 0} ignorados por conflito.`,
+      })
+    } catch (error: any) {
+      console.error(error)
+      toast({
+        title: "Erro",
+        description: error.message || "Nao foi possivel registrar a faixa livre.",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const handleSafeRealign = async () => {
+    try {
+      const response = await fetch("/api/etiquetas-provisorias", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "realinhar_patrimonios",
+          ano,
+        }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || "Erro ao realinhar patrimonios")
+
+      setIsRealignDialogOpen(false)
+      setRealignSummary(data.summary || null)
+      await mutateSettings()
+      toast({
+        title: "Patrimonios realinhados",
+        description: `Proximo numero: ${data.formatted}. Lacunas detectadas: ${data.gapsDetected || 0}. Reutilizaveis: ${data.reusableCount || 0}.`,
+      })
+    } catch (error: any) {
+      console.error(error)
+      toast({
+        title: "Erro",
+        description: error.message || "Nao foi possivel realinhar a sequencia.",
+        variant: "destructive",
+      })
     }
   }
 
@@ -390,7 +822,13 @@ export function EtiquetasProvisoriasGenerator() {
 
     try {
         const { jsPDF } = await import("jspdf")
-        
+        const effectiveTitle = customTitle || zebraConfig.title
+        const effectiveSubtitle = zebraConfig.subtitle
+        const shouldShowDescription = zebraConfig.showDescription
+        const shouldShowEmenda = zebraConfig.showEmenda
+        const shouldShowFooter = zebraConfig.showFooter
+        const shouldShowLocation = showLocation || zebraConfig.showLocation
+
         const cols = parseInt(columns) || 2
         const labelWidth = 50
         // Aumentamos a altura da página PDF para enganar a impressora.
@@ -398,7 +836,7 @@ export function EtiquetasProvisoriasGenerator() {
         // Mas o conteúdo nós desenhamos no topo absoluto dessa página maior.
         // Assim, quando a impressora pular os 14mm, ela vai começar a imprimir onde queremos.
         // Usuário pediu +0,6cm (6mm) de altura extra -> Total 14mm + 6mm = 20mm
-        const extraHeight = 20
+        const extraHeight = zebraConfig.alturaExtraMm
         const labelHeight = 25 + extraHeight 
         const pageWidth = labelWidth * cols
         
@@ -421,34 +859,53 @@ export function EtiquetasProvisoriasGenerator() {
             // Ajuste horizontal individual por coluna
             // Coluna 1: 0mm (Perfeito segundo usuário)
             // Coluna 2: +3mm (Era 5mm, usuário pediu para mover 0,2cm = 2mm para ESQUERDA)
-            const marginLeft = colIndex === 0 ? 0 : 3 
+            const marginLeft = zebraConfig.offsetXMm + (colIndex === 1 ? zebraConfig.offsetColuna2Mm : 0)
             
             // O conteúdo começa no TOPO da página (0), mas como a página é maior e a impressora tem offset,
             // esperamos que o conteúdo "caia" no lugar certo.
-            const marginTop = 1 
+            const marginTop = zebraConfig.offsetYMm
             
             const xOffset = (colIndex * labelWidth) + marginLeft
 
             const qrDataUrl = await generateQRCodeDataURL(label.numero)
             
             // --- LAYOUT ---
-            const qrSize = 17
-            doc.addImage(qrDataUrl, 'PNG', xOffset, marginTop + 1, qrSize, qrSize) 
+            // Reduzido QR para 16mm para dar mais espaço
+            const qrSize = zebraConfig.qrSizeMm
+            doc.addImage(qrDataUrl, 'PNG', xOffset + zebraConfig.innerPaddingMm, marginTop + zebraConfig.innerPaddingMm, qrSize, qrSize) 
 
             // Área de texto
-            const textX = xOffset + qrSize + 2
+            const textX = xOffset + zebraConfig.innerPaddingMm + qrSize + 2
             const maxTextWidth = 26 
+            
+            // Cursor vertical dinâmico para evitar sobreposição
+            let currentY = marginTop + zebraConfig.innerPaddingMm
 
             // Título (Aumentado e Negrito)
             doc.setFont("helvetica", "bold")
-            if (customTitle) {
-                doc.setFontSize(6.5) // Aumentado de 5 para 6.5
-                doc.text(customTitle.toUpperCase().substring(0, 25), textX, marginTop + 3) 
-                doc.setLineWidth(0.2) // Linha mais grossa
-                doc.line(textX, marginTop + 4, xOffset + 45, marginTop + 4)
+            if (effectiveTitle) {
+                doc.setFontSize(6.5) 
+                currentY += 2.0; // Reduzido de 2.5
+                doc.text(effectiveTitle.toUpperCase().substring(0, 25), textX, currentY) 
+                
+                currentY += 0.8; // Reduzido de 1
+                doc.setLineWidth(0.2) 
+                doc.line(textX, currentY, xOffset + 45, currentY)
+                
+                currentY += 0.8; // Reduzido de 1
+                if (effectiveSubtitle) {
+                    doc.setFont("helvetica", "normal")
+                    doc.setFontSize(5)
+                    currentY += 1.8
+                    doc.text(effectiveSubtitle.toUpperCase().substring(0, 28), textX, currentY)
+                    doc.setFont("helvetica", "bold")
+                }
+            } else if (shouldShowFooter) {
+                currentY += 2.0; // Reduzido de 3
             }
 
             // Número (Mantém negrito e tamanho adaptável)
+            currentY += 2.5; // Reduzido de 3
             let fontSize = 9
             doc.setFontSize(fontSize)
             let textWidth = doc.getTextWidth(label.numero)
@@ -457,32 +914,66 @@ export function EtiquetasProvisoriasGenerator() {
                 doc.setFontSize(fontSize)
                 textWidth = doc.getTextWidth(label.numero)
             }
-            doc.text(label.numero, textX, customTitle ? marginTop + 7 : marginTop + 6) 
-
+            doc.text(label.numero, textX, currentY) 
+            
             // Descrição (Aumentado e Negrito)
-            if (label.descricao) {
-                doc.setFont("helvetica", "bold") // Agora em Negrito
-                doc.setFontSize(6) // Aumentado de 5.5 para 6
-                const splitDesc = doc.splitTextToSize(label.descricao.toUpperCase(), maxTextWidth)
-                const lines = splitDesc.length > 3 ? splitDesc.slice(0, 3) : splitDesc
-                doc.text(lines, textX, customTitle ? marginTop + 10 : marginTop + 9) 
+            if (shouldShowDescription && label.descricao) {
+                currentY += 3.0; 
+                doc.setFont("helvetica", "bold") 
+                doc.setFontSize(6) 
+                
+                // Limita a 2 linhas conforme solicitado pelo usuário
+                // Se mostrar emenda, limita a 1 linha
+                const maxLines = shouldShowEmenda && label.emenda ? 1 : 2
+                const lines = splitLabelTextLines(doc, label.descricao.toUpperCase(), maxTextWidth, maxLines)
+                
+                doc.text(lines, textX, currentY)
+                
+                // Calcula altura ocupada pela descrição para mover o cursor
+                // Ajustando line height para evitar sobreposição
+                const lineHeight = 2.5
+                // Se tiver mais de uma linha, precisa descer o cursor
+                const descHeight = (lines.length - 1) * lineHeight
+                currentY += descHeight
             }
 
-            // Localização (Aumentado e Negrito)
-            if (showLocation && label.localizacao) {
-                doc.setFont("helvetica", "bold") // Agora em Negrito
-                doc.setFontSize(5.5) // Aumentado de 5 para 5.5
-                const locText = `${label.localizacao.departamento} ${label.localizacao.sala}`.toUpperCase()
-                const splitLoc = doc.splitTextToSize(locText, maxTextWidth)
-                // Subiu de +14.5 para +13.5 para ficar colado na descrição
-                doc.text(splitLoc.slice(0, 2), textX, marginTop + 13.5) 
+            // Emenda Parlamentar (automatica quando existir)
+            if (shouldShowEmenda && label.emenda) {
+                 currentY += 2.2
+                 doc.setFont("helvetica", "normal")
+                 doc.setFontSize(5.6)
+                 const emendaLines = splitLabelTextLines(doc, label.emenda, maxTextWidth, 2)
+                 doc.text(emendaLines, textX, currentY)
+                 currentY += (emendaLines.length - 1) * 2.6
             }
 
+            // Localização removida a pedido do usuário
+            // if (showLocation && label.localizacao) { ... }
+            
             // Rodapé fixo (Aumentado e Negrito)
-            doc.setFont("helvetica", "bold") // Agora em Negrito
-            doc.setFontSize(6) // Aumentado de 4.5 para 6 (Bem maior)
-            // Baixou de +19 para +21 para aproveitar o espaço embaixo
-            doc.text("SISPATRIMONIO", xOffset + 45, marginTop + 21, { align: "right" }) 
+            if (shouldShowLocation && label.localizacao && (label.localizacao.departamento || label.localizacao.sala)) {
+                 currentY += 2.3;
+                 doc.setFont("helvetica", "normal")
+                 doc.setFontSize(4.8)
+                 const locationText = [label.localizacao.departamento, label.localizacao.sala].filter(Boolean).join(" - ")
+                 const locationLines = doc.splitTextToSize(locationText.toUpperCase(), maxTextWidth).slice(0, 2)
+                 doc.text(locationLines, textX, currentY)
+                 currentY += (locationLines.length - 1) * 2.2;
+            }
+
+            doc.setFont("helvetica", "bold") 
+            doc.setFontSize(5) 
+            // Garante que fique no final (23mm), mas se o conteúdo empurrou muito, desce um pouco
+            // O limite físico é ~25mm. Margem top 1mm.
+            const footerY = Math.max(marginTop + 22, currentY + 2.5);
+            
+            // Verifica se estourou a etiqueta (25mm)
+            if (shouldShowFooter && footerY > 25) {
+                // Se estourou, tenta imprimir em 24mm mesmo que sobreponha levemente, ou não imprime
+                doc.text("SISPATRIMONIO", xOffset + 45, 24, { align: "right" }) 
+            } else {
+                doc.text("SISPATRIMONIO", xOffset + 45, footerY, { align: "right" }) 
+            } 
         }
 
         doc.save(`etiquetas_zebra_${cols}col_${new Date().toISOString().slice(0,10)}.pdf`)
@@ -497,7 +988,6 @@ export function EtiquetasProvisoriasGenerator() {
         toast({
             title: "Erro",
             description: "Falha ao gerar o arquivo PDF.",
-            variant: "destructive",
         })
     }
   }
@@ -512,6 +1002,12 @@ export function EtiquetasProvisoriasGenerator() {
       return
     }
     const cols = parseInt(columns)
+    const effectiveTitle = customTitle || zebraConfig.title
+    const effectiveSubtitle = zebraConfig.subtitle
+    const shouldShowDescription = zebraConfig.showDescription
+    const shouldShowEmenda = zebraConfig.showEmenda
+    const shouldShowFooter = zebraConfig.showFooter
+    const shouldShowLocation = showLocation || zebraConfig.showLocation
     // Label size: 5cm width x 2.5cm height
     const labelWidthMm = 50
     const labelHeightMm = 25
@@ -519,7 +1015,7 @@ export function EtiquetasProvisoriasGenerator() {
     
     // Determine if we should force a specific page size (best for Zebra)
     // If we set height in @page, it forces pagination per label/row
-    const pageHeightMm = labelHeightMm
+    const pageHeightMm = labelHeightMm + zebraConfig.alturaExtraMm
 
     let labelsHtml = ""
     
@@ -545,29 +1041,27 @@ export function EtiquetasProvisoriasGenerator() {
           align-items: center;
           justify-content: flex-start;
           gap: 2mm;
-          padding: 1.5mm;
+          padding: ${zebraConfig.innerPaddingMm}mm;
           box-sizing: border-box;
           overflow: hidden;
           position: relative;
+          left: ${zebraConfig.offsetXMm + (i % cols === 1 ? zebraConfig.offsetColuna2Mm : 0)}mm;
+          top: ${zebraConfig.offsetYMm}mm;
         ">
-          <img src="${qrDataUrl}" style="width: ${labelHeightMm - 4}mm; height: ${labelHeightMm - 4}mm; flex-shrink: 0;" alt="QR" />
+          <img src="${qrDataUrl}" style="width: ${zebraConfig.qrSizeMm}mm; height: ${zebraConfig.qrSizeMm}mm; flex-shrink: 0;" alt="QR" />
           <div style="flex: 1; min-width: 0; text-align: left; display: flex; flex-direction: column; justify-content: center; height: 100%;">
-            ${customTitle ? `<div style="font-size: 5pt; font-weight: bold; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 0.5mm; border-bottom: 0.5px solid #000;">${customTitle}</div>` : ""}
+            ${effectiveTitle ? `<div style="font-size: 5pt; font-weight: bold; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 0.5mm; border-bottom: 0.5px solid #000;">${effectiveTitle}</div>` : ""}
+            ${effectiveSubtitle ? `<div style="font-size: 4.4pt; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 0.4mm;">${effectiveSubtitle}</div>` : ""}
             
             <div style="font-size: 7.5pt; font-weight: bold; font-family: monospace; letter-spacing: -0.2px; line-height: 1; margin-top: 0.5mm;">
               ${label.numero}
             </div>
             
-            ${label.descricao ? `<div style="font-size: 5.5pt; color: #000; margin-top: 0.5mm; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; line-height: 1.1;">${label.descricao}</div>` : ""}
+            ${shouldShowDescription && label.descricao ? `<div style="font-size: 5.5pt; color: #000; margin-top: 0.5mm; overflow: hidden; text-overflow: ellipsis; white-space: ${shouldShowEmenda && label.emenda ? "nowrap" : "normal"}; display: ${shouldShowEmenda && label.emenda ? "block" : "-webkit-box"}; -webkit-line-clamp: ${shouldShowEmenda && label.emenda ? "1" : "2"}; -webkit-box-orient: vertical; font-weight: 600; line-height: 1.1;">${label.descricao}</div>` : ""}
+            ${shouldShowEmenda && label.emenda ? `<div style="font-size: 5.3pt; color: #000; margin-top: 0.45mm; overflow: hidden; line-height: 1.18; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word;">${label.emenda}</div>` : ""}
+            ${shouldShowLocation && label.localizacao ? `<div style="font-size: 4.3pt; color: #000; margin-top: 0.4mm; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.05;">${[label.localizacao.departamento, label.localizacao.sala].filter(Boolean).join(" - ")}</div>` : ""}
             
-            ${showLocation && label.localizacao ? `
-                <div style="font-size: 4.5pt; color: #000; margin-top: 0.5mm; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; line-height: 1;">
-                    ${label.localizacao.departamento ? label.localizacao.departamento.substring(0, 20) : ""}
-                    ${label.localizacao.sala ? ` - ${label.localizacao.sala.substring(0, 15)}` : ""}
-                </div>
-            ` : ""}
-            
-            <div style="font-size: 4pt; color: #000; margin-top: auto; text-transform: uppercase; text-align: right;">SisPatrimonio</div>
+            ${shouldShowFooter ? `<div style="font-size: 4pt; color: #000; margin-top: auto; text-transform: uppercase; text-align: right;">SisPatrimonio</div>` : ""}
           </div>
         </div>
       `
@@ -704,6 +1198,66 @@ export function EtiquetasProvisoriasGenerator() {
           </p>
         </div>
         <div className="flex gap-2">
+          <Dialog open={isGapDialogOpen} onOpenChange={setIsGapDialogOpen}>
+            <DialogTrigger asChild>
+              <Button variant="outline" className="gap-2 bg-transparent">
+                <Hash className="h-4 w-4" />
+                Registrar Faixa Livre
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Registrar Faixa Livre Antiga</DialogTitle>
+                <DialogDescription>
+                  Informe a faixa de numeros antigos que ficaram sem uso para que o sistema possa reaproveita-los.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-4 py-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="gap-start">Numero inicial</Label>
+                    <Input id="gap-start" type="number" min={1} value={gapStart} onChange={(e) => setGapStart(e.target.value.replace(/\D/g, ""))} />
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="gap-end">Numero final</Label>
+                    <Input id="gap-end" type="number" min={1} value={gapEnd} onChange={(e) => setGapEnd(e.target.value.replace(/\D/g, ""))} />
+                  </div>
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="gap-observation">Observacao</Label>
+                  <Input id="gap-observation" value={gapObservation} onChange={(e) => setGapObservation(e.target.value)} placeholder="Ex: etiquetas antigas nao utilizadas" />
+                </div>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setIsGapDialogOpen(false)}>Cancelar</Button>
+                <Button onClick={handleRegisterGapRange}>Registrar Faixa</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+          <Dialog open={isRealignDialogOpen} onOpenChange={setIsRealignDialogOpen}>
+            <DialogTrigger asChild>
+              <Button variant="outline" className="gap-2 bg-transparent">
+                <RefreshCw className="h-4 w-4" />
+                Realinhar Patrimonios
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Realinhar Patrimonios</DialogTitle>
+                <DialogDescription>
+                  O sistema vai analisar a sequencia de {ano}, priorizar numeros reaproveitaveis e, se nao houver, ajustar o proximo numero para a menor lacuna segura sem tocar em etiquetas ja usadas.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setIsRealignDialogOpen(false)}>
+                  Cancelar
+                </Button>
+                <Button onClick={handleSafeRealign}>
+                  Confirmar Realinhamento
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
           {labels.length > 0 && (
             <>
               <Button
@@ -730,9 +1284,15 @@ export function EtiquetasProvisoriasGenerator() {
       {/* Configuration */}
       <Card>
         <CardHeader className="pb-3">
-          <div className="flex items-center gap-2">
-            <Settings2 className="h-5 w-5 text-primary" />
-            <CardTitle className="text-base">Configuracao das Etiquetas</CardTitle>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Settings2 className="h-5 w-5 text-primary" />
+              <CardTitle className="text-base">Configuracao das Etiquetas</CardTitle>
+            </div>
+            <Button className="gap-2" onClick={handleSaveSettings} disabled={savingSettings}>
+              {savingSettings ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              Salvar Preset
+            </Button>
           </div>
           <CardDescription>
             Defina o ano, sequencia e layout de impressao para as etiquetas provisorias
@@ -777,6 +1337,33 @@ export function EtiquetasProvisoriasGenerator() {
               <p className="text-[10px] text-muted-foreground">
                 O sistema detectou que este e o proximo numero disponivel para {ano}.
               </p>
+              <p className="text-[10px] font-medium text-muted-foreground">
+                Origem: {sequenceSource === "reuso" ? "reuso de numero livre" : sequenceSource === "ajuste_manual" ? "ajuste manual" : sequenceSource === "realinhamento_seguro" ? "realinhamento seguro" : "sequencia normal"}
+              </p>
+              {realignSummary && (
+                <p className="text-[10px] text-muted-foreground">
+                  Ultimo realinhamento: {realignSummary.gapsDetected} lacuna(s), {realignSummary.reusableCount} reutilizavel(is), proximo {realignSummary.formatted}.
+                </p>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="manual-seq-etiqueta" className="flex items-center gap-1.5">
+                <Hash className="h-3.5 w-3.5 text-muted-foreground" />
+                Proximo Numero Manual
+              </Label>
+              <Input
+                id="manual-seq-etiqueta"
+                type="number"
+                min={1}
+                value={manualNextSeq}
+                onChange={(e) => setManualNextSeq(e.target.value.replace(/\D/g, ""))}
+                placeholder="Ex: 245"
+                className="font-mono"
+              />
+              <p className="text-[10px] text-muted-foreground">
+                Use para realinhar a sequencia sem perder o reaproveitamento automatico.
+              </p>
             </div>
 
             <div className="flex flex-col gap-2">
@@ -799,42 +1386,164 @@ export function EtiquetasProvisoriasGenerator() {
                 Zebra ZD220: bobina com 2 etiquetas por linha
               </p>
             </div>
-
-            <div className="flex flex-col gap-2">
-              <Label className="flex items-center gap-1.5">
-                <QrCode className="h-3.5 w-3.5 text-muted-foreground" />
-                Tamanho Etiqueta
-              </Label>
-              <div className="rounded-lg bg-muted p-3">
-                <p className="text-sm font-mono font-medium">5,0cm x 2,5cm</p>
-                <p className="text-xs text-muted-foreground">Largura x Altura</p>
-              </div>
+            <div className="sm:col-span-2 lg:col-span-4">
+              <Button
+                variant="outline"
+                type="button"
+                className="w-full justify-between bg-transparent"
+                onClick={() => setShowAdvancedSettings((prev) => !prev)}
+              >
+                {showAdvancedSettings ? "Ocultar ajustes avancados" : "Mostrar ajustes avancados"}
+                <Settings2 className="h-4 w-4" />
+              </Button>
             </div>
 
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="titulo-etiqueta" className="flex items-center gap-1.5">
-                <Type className="h-3.5 w-3.5 text-muted-foreground" />
-                Titulo Personalizado
-              </Label>
-              <Input
-                id="titulo-etiqueta"
-                value={customTitle}
-                onChange={(e) => setCustomTitle(e.target.value)}
-                placeholder="Ex: Secretaria de Saude"
-                className="text-sm"
-              />
-              <div className="flex items-center space-x-2 mt-1">
-                <Checkbox 
-                  id="show-location" 
-                  checked={showLocation} 
-                  onCheckedChange={(c) => setShowLocation(!!c)} 
-                />
-                <Label htmlFor="show-location" className="text-xs font-normal cursor-pointer">
-                  Imprimir Depto/Sala
-                </Label>
-              </div>
-            </div>
+            {showAdvancedSettings && (
+              <>
+                <div className="flex flex-col gap-2">
+                  <Label className="flex items-center gap-1.5">
+                    <QrCode className="h-3.5 w-3.5 text-muted-foreground" />
+                    Tamanho Etiqueta
+                  </Label>
+                  <div className="rounded-lg bg-muted p-3">
+                    <p className="text-sm font-mono font-medium">5,0cm x 2,5cm</p>
+                    <p className="text-xs text-muted-foreground">Largura x Altura</p>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="titulo-etiqueta" className="flex items-center gap-1.5">
+                    <Type className="h-3.5 w-3.5 text-muted-foreground" />
+                    Titulo Personalizado
+                  </Label>
+                  <Input
+                    id="titulo-etiqueta"
+                    value={customTitle}
+                    onChange={(e) => setCustomTitle(e.target.value)}
+                    placeholder="Ex: Secretaria de Saude"
+                    className="text-sm"
+                  />
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="subtitulo-etiqueta">Subtitulo Opcional</Label>
+                  <Input
+                    id="subtitulo-etiqueta"
+                    value={zebraConfig.subtitle}
+                    onChange={(e) => setZebraConfig((prev) => ({ ...prev, subtitle: e.target.value }))}
+                    placeholder="Ex: Patrimonio Provisorio"
+                    className="text-sm"
+                  />
+                </div>
+                 
+                <div className="flex flex-col gap-2">
+                  <Label className="flex items-center gap-1.5">
+                    <Hash className="h-3.5 w-3.5 text-muted-foreground" />
+                    Emenda Parlamentar
+                  </Label>
+                  <div className="rounded-lg bg-muted p-3">
+                    <p className="text-sm font-medium">Impressao automatica</p>
+                    <p className="text-xs text-muted-foreground">
+                      Sempre que a etiqueta tiver emenda salva, ela sera impressa no PDF e na Zebra.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3 rounded-lg border p-3 sm:col-span-2">
+                  <Label>Campos Visiveis</Label>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <label className="flex items-center gap-2 text-sm">
+                      <Checkbox checked={zebraConfig.showDescription} onCheckedChange={(checked) => setZebraConfig((prev) => ({ ...prev, showDescription: !!checked }))} />
+                      Mostrar descricao
+                    </label>
+                    <label className="flex items-center gap-2 text-sm">
+                      <Checkbox checked={zebraConfig.showEmenda} onCheckedChange={(checked) => setZebraConfig((prev) => ({ ...prev, showEmenda: !!checked }))} />
+                      Mostrar emenda
+                    </label>
+                    <label className="flex items-center gap-2 text-sm">
+                      <Checkbox checked={showLocation || zebraConfig.showLocation} onCheckedChange={(checked) => { setShowLocation(!!checked); setZebraConfig((prev) => ({ ...prev, showLocation: !!checked })) }} />
+                      Mostrar localizacao
+                    </label>
+                    <label className="flex items-center gap-2 text-sm">
+                      <Checkbox checked={zebraConfig.showFooter} onCheckedChange={(checked) => setZebraConfig((prev) => ({ ...prev, showFooter: !!checked }))} />
+                      Mostrar rodape
+                    </label>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label>Tamanho do QR (mm)</Label>
+                  <Input type="number" step="0.5" min="8" value={zebraConfig.qrSizeMm} onChange={(e) => setZebraConfig(prev => ({ ...prev, qrSizeMm: Number(e.target.value) }))} />
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label>Offset Horizontal Geral (mm)</Label>
+                  <Input type="number" step="0.5" value={zebraConfig.offsetXMm} onChange={(e) => setZebraConfig(prev => ({ ...prev, offsetXMm: Number(e.target.value) }))} />
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label>Offset Vertical Geral (mm)</Label>
+                  <Input type="number" step="0.5" value={zebraConfig.offsetYMm} onChange={(e) => setZebraConfig(prev => ({ ...prev, offsetYMm: Number(e.target.value) }))} />
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label>Ajuste Extra da 2a Coluna (mm)</Label>
+                  <Input type="number" step="0.5" value={zebraConfig.offsetColuna2Mm} onChange={(e) => setZebraConfig(prev => ({ ...prev, offsetColuna2Mm: Number(e.target.value) }))} />
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label>Altura Extra PDF Zebra (mm)</Label>
+                  <Input type="number" step="0.5" value={zebraConfig.alturaExtraMm} onChange={(e) => setZebraConfig(prev => ({ ...prev, alturaExtraMm: Number(e.target.value) }))} />
+                </div>
+
+                <div className="flex flex-col gap-2">
+                  <Label>Margem Interna (mm)</Label>
+                  <Input type="number" step="0.5" value={zebraConfig.innerPaddingMm} onChange={(e) => setZebraConfig(prev => ({ ...prev, innerPaddingMm: Number(e.target.value) }))} />
+                </div>
+              </>
+            )}
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Faixas Livres Registradas</CardTitle>
+          <CardDescription>
+            Historico das lacunas antigas registradas para reuso controlado.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          {faixasLivres.length > 0 ? (
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Faixa</TableHead>
+                    <TableHead>Quantidade</TableHead>
+                    <TableHead>Observacao</TableHead>
+                    <TableHead>Registrado por</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {faixasLivres.map((faixa) => (
+                    <TableRow key={faixa.id}>
+                      <TableCell className="font-mono text-xs">
+                        {generateProvNumber(faixa.ano, faixa.seq_inicial)}
+                        <br />
+                        {generateProvNumber(faixa.ano, faixa.seq_final)}
+                      </TableCell>
+                      <TableCell>{faixa.quantidade_registrada}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{faixa.observacao || "-"}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{faixa.criado_por_nome || "Sistema"}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          ) : (
+            <div className="p-6 text-sm text-muted-foreground">Nenhuma faixa livre registrada para {ano}.</div>
+          )}
         </CardContent>
       </Card>
 
@@ -993,9 +1702,9 @@ export function EtiquetasProvisoriasGenerator() {
                                 {patNum}
                             </Badge>
                             {isPrinted && (
-                                <Badge variant="secondary" className="text-[9px] bg-green-100 text-green-800 hover:bg-green-100 w-fit border-green-200">
-                                    Impresso
-                                </Badge>
+                              <Badge variant="secondary" className="text-[9px] bg-green-100 text-green-800 hover:bg-green-100 w-fit border-green-200">
+                                  Impresso
+                              </Badge>
                             )}
                           </div>
                           {alreadyAdded && (
@@ -1055,6 +1764,102 @@ export function EtiquetasProvisoriasGenerator() {
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <CardTitle className="text-base">Lotes Reservados</CardTitle>
+              <CardDescription>Estoque e historico de numeros reservados. Por padrao, a lista mostra apenas lotes com saldo pendente.</CardDescription>
+            </div>
+            <Select value={lotStatusFilter} onValueChange={setLotStatusFilter}>
+              <SelectTrigger className="w-[220px]">
+                <SelectValue placeholder="Filtrar status" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="pendentes">Apenas pendentes</SelectItem>
+                <SelectItem value="todos">Todos os status</SelectItem>
+                <SelectItem value="reservado">Reservado</SelectItem>
+                <SelectItem value="parcialmente_usado">Parcialmente usado</SelectItem>
+                <SelectItem value="usado">Usado</SelectItem>
+                <SelectItem value="cancelado">Cancelado</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </CardHeader>
+        <CardContent className="p-3">
+          {lotes.length > 0 ? (
+            <Accordion type="single" collapsible className="space-y-2">
+              {lotes.map((lote) => (
+                <AccordionItem key={lote.id} value={`lote-${lote.id}`} className="rounded-lg border bg-card px-4">
+                  <div className="flex flex-col gap-3 py-3 lg:flex-row lg:items-center lg:justify-between">
+                    <AccordionTrigger className="flex-1 py-0 hover:no-underline">
+                      <div className="grid flex-1 gap-2 text-left md:grid-cols-[minmax(120px,1fr)_minmax(180px,1.2fr)_110px_minmax(180px,1.3fr)]">
+                        <div className="flex flex-col">
+                          <span className="font-medium">Lote #{lote.id}</span>
+                          <span className="text-xs text-muted-foreground">{lote.criado_por_nome || "Sistema"}</span>
+                        </div>
+                        <div className="font-mono text-xs">
+                          <div>{lote.faixa_inicial}</div>
+                          <div>{lote.faixa_final}</div>
+                        </div>
+                        <div>
+                          <Badge variant="outline">{lote.status}</Badge>
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {lote.pendentes} pendentes, {lote.usadas} usadas, {lote.reutilizaveis} reutilizaveis
+                        </div>
+                      </div>
+                    </AccordionTrigger>
+                    <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="bg-transparent"
+                        disabled={lote.pendentes === 0 || loadingLotId === lote.id}
+                        onClick={() => handleAddLotToPrint(lote)}
+                      >
+                        {loadingLotId === lote.id ? "Carregando..." : "Adicionar a impressao"}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="bg-transparent"
+                        disabled={lote.pendentes === 0}
+                        onClick={() => setLotPendingCancellation(lote)}
+                      >
+                        Cancelar Saldo Reservado
+                      </Button>
+                    </div>
+                  </div>
+                  <AccordionContent className="pb-4 pt-0">
+                    <div className="grid gap-3 rounded-md border bg-muted/20 p-3 text-sm md:grid-cols-2">
+                      <div>
+                        <p className="text-xs uppercase text-muted-foreground">Origem</p>
+                        <p>{lote.origem_reserva === "faixa_manual" ? "Reserva por faixa" : "Automatico por quantidade"}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs uppercase text-muted-foreground">Emenda</p>
+                        <p>{lote.emenda_parlamentar || "-"}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs uppercase text-muted-foreground">Faixa completa</p>
+                        <p className="font-mono text-xs">{lote.faixa_inicial} ate {lote.faixa_final}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs uppercase text-muted-foreground">Resumo detalhado</p>
+                        <p>{lote.quantidade} reservadas, {lote.pendentes} pendentes, {lote.usadas} usadas e {lote.reutilizaveis} reutilizaveis</p>
+                      </div>
+                    </div>
+                  </AccordionContent>
+                </AccordionItem>
+              ))}
+            </Accordion>
+          ) : (
+            <div className="p-6 text-sm text-muted-foreground">Nenhum lote reservado encontrado para este filtro.</div>
+          )}
+        </CardContent>
+      </Card>
+
       {/* Manual label creation + generated labels list */}
       <Card>
         <CardHeader className="pb-3">
@@ -1064,7 +1869,7 @@ export function EtiquetasProvisoriasGenerator() {
                 Etiquetas a Imprimir ({labels.length})
               </CardTitle>
               <CardDescription>
-                Adicione etiquetas manualmente ou a partir dos bens acima
+                Fila temporaria da impressao atual. Aqui voce pode ajustar a descricao antes de imprimir as etiquetas enviadas manualmente, pelos bens acima ou por um lote reservado.
               </CardDescription>
             </div>
             <div className="flex gap-2">
@@ -1090,10 +1895,33 @@ export function EtiquetasProvisoriasGenerator() {
                   <DialogHeader>
                     <DialogTitle>Gerar Lote de Etiquetas</DialogTitle>
                     <DialogDescription>
-                      Gere multiplas etiquetas provisorias sequenciais de uma vez.
+                      Reserve etiquetas automaticas por quantidade ou escolha uma faixa especifica.
                     </DialogDescription>
                   </DialogHeader>
                   <div className="grid gap-4 py-4">
+                    <div className="grid gap-2">
+                      <Label>Modo de reserva</Label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button
+                          type="button"
+                          variant={batchMode === "automatico" ? "default" : "outline"}
+                          className="justify-start"
+                          onClick={() => setBatchMode("automatico")}
+                        >
+                          Automatico por quantidade
+                        </Button>
+                        <Button
+                          type="button"
+                          variant={batchMode === "faixa" ? "default" : "outline"}
+                          className="justify-start"
+                          onClick={() => setBatchMode("faixa")}
+                        >
+                          Escolher faixa
+                        </Button>
+                      </div>
+                    </div>
+
+                    {batchMode === "automatico" ? (
                     <div className="flex flex-col gap-2">
                       <Label htmlFor="quantity">Quantidade</Label>
                       <Input
@@ -1107,6 +1935,86 @@ export function EtiquetasProvisoriasGenerator() {
                         Serao geradas {batchQuantity} etiquetas a partir de {generateProvNumber(ano, nextSeq)}.
                       </p>
                     </div>
+                    ) : (
+                      <>
+                        <div className="grid gap-2">
+                          <Label>Formato da faixa</Label>
+                          <div className="grid grid-cols-2 gap-2">
+                            <Button
+                              type="button"
+                              variant={batchRangeMode === "quantidade" ? "default" : "outline"}
+                              className="justify-start"
+                              onClick={() => setBatchRangeMode("quantidade")}
+                            >
+                              Numero inicial + quantidade
+                            </Button>
+                            <Button
+                              type="button"
+                              variant={batchRangeMode === "final" ? "default" : "outline"}
+                              className="justify-start"
+                              onClick={() => setBatchRangeMode("final")}
+                            >
+                              Numero inicial + numero final
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="flex flex-col gap-2">
+                            <Label htmlFor="range-start">Numero inicial</Label>
+                            <Input
+                              id="range-start"
+                              type="number"
+                              min={1}
+                              value={batchRangeStart}
+                              onChange={(e) => setBatchRangeStart(e.target.value)}
+                              placeholder={`Ex: ${nextSeq}`}
+                            />
+                          </div>
+                          <div className="flex flex-col gap-2">
+                            <Label htmlFor="range-end">
+                              {batchRangeMode === "quantidade" ? "Quantidade" : "Numero final"}
+                            </Label>
+                            <Input
+                              id="range-end"
+                              type="number"
+                              min={1}
+                              value={batchRangeMode === "quantidade" ? batchQuantity : batchRangeEnd}
+                              onChange={(e) => {
+                                const value = Math.max(1, parseInt(e.target.value) || 1)
+                                if (batchRangeMode === "quantidade") {
+                                  setBatchQuantity(value)
+                                } else {
+                                  setBatchRangeEnd(String(value))
+                                }
+                              }}
+                              placeholder={batchRangeMode === "quantidade" ? "Ex: 50" : "Ex: 245"}
+                            />
+                          </div>
+                        </div>
+                        <div className="rounded-md border bg-muted/40 p-3 text-sm">
+                          <p className="font-medium">Resumo da reserva por faixa</p>
+                          <p className="text-muted-foreground">
+                            Ano: {ano} | Faixa: {calculatedRangeStart > 0 && calculatedRangeEnd >= calculatedRangeStart
+                              ? `${generateProvNumber(ano, calculatedRangeStart)} ate ${generateProvNumber(ano, calculatedRangeEnd)}`
+                              : "Preencha a faixa"}
+                          </p>
+                          <p className="text-muted-foreground">
+                            Quantidade total: {calculatedRangeQuantity || 0} | Modo: estrito
+                          </p>
+                          <p className="text-muted-foreground">
+                            Se algum numero estiver bloqueado por bem ou reserva ativa, o lote nao sera criado.
+                          </p>
+                        </div>
+                      </>
+                    )}
+                    <div className="flex flex-col gap-2">
+                      <Label htmlFor="batch-emenda">Emenda Parlamentar</Label>
+                      <Input id="batch-emenda" value={batchEmenda} onChange={(e) => setBatchEmenda(e.target.value)} placeholder="Opcional" />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <Label htmlFor="batch-observation">Observacao do lote</Label>
+                      <Input id="batch-observation" value={batchObservation} onChange={(e) => setBatchObservation(e.target.value)} placeholder="Ex: Reserva para unidade X" />
+                    </div>
                   </div>
                   <DialogFooter>
                     <Button variant="outline" onClick={() => setIsBatchDialogOpen(false)} disabled={isGenerating}>Cancelar</Button>
@@ -1117,17 +2025,59 @@ export function EtiquetasProvisoriasGenerator() {
                           Gerando...
                         </>
                       ) : (
-                        "Gerar Etiquetas"
+                        batchMode === "faixa" ? "Reservar Faixa" : "Gerar Etiquetas"
                       )}
                     </Button>
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
 
-              <Button variant="outline" size="sm" className="gap-1.5 bg-transparent" onClick={handleAddManual}>
-                <Plus className="h-4 w-4" />
-                Adicionar Manual
-              </Button>
+              <Dialog open={isManualDialogOpen} onOpenChange={setIsManualDialogOpen}>
+                <DialogTrigger asChild>
+                  <Button variant="outline" size="sm" className="gap-1.5 bg-transparent">
+                    <Plus className="h-4 w-4" />
+                    Adicionar Manual
+                  </Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Adicionar Etiqueta Manual</DialogTitle>
+                    <DialogDescription>
+                      Crie uma etiqueta avulsa com descricao e emenda opcional.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="grid gap-4 py-4">
+                    <div className="flex flex-col gap-2">
+                      <Label>Numero que sera usado</Label>
+                      <Input value={generateProvNumber(ano, nextSeq)} readOnly className="bg-muted font-mono" />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <Label htmlFor="manual-descricao">Descricao</Label>
+                      <Input
+                        id="manual-descricao"
+                        value={manualDescricao}
+                        onChange={(e) => setManualDescricao(e.target.value)}
+                        placeholder="Opcional"
+                      />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <Label htmlFor="manual-emenda">Emenda Parlamentar</Label>
+                      <Input
+                        id="manual-emenda"
+                        value={manualEmenda}
+                        onChange={(e) => setManualEmenda(e.target.value)}
+                        placeholder="Opcional"
+                      />
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setIsManualDialogOpen(false)}>
+                      Cancelar
+                    </Button>
+                    <Button onClick={handleAddManual}>Adicionar</Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
             </div>
           </div>
         </CardHeader>
@@ -1192,13 +2142,38 @@ export function EtiquetasProvisoriasGenerator() {
                   Nenhuma etiqueta adicionada
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  Selecione bens acima ou adicione etiquetas manualmente
+                  Selecione bens acima, adicione etiquetas manualmente ou envie um lote reservado para impressao
                 </p>
               </div>
             </div>
           )}
         </CardContent>
       </Card>
+
+      <AlertDialog open={Boolean(lotPendingCancellation)} onOpenChange={(open) => !open && setLotPendingCancellation(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancelar saldo reservado deste lote?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {lotPendingCancellation ? `Ao confirmar, as etiquetas ainda nao usadas do lote #${lotPendingCancellation.id} deixarao de ficar reservadas e voltarao para reuso. Etiquetas ja usadas nao serao alteradas.` : ""}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Voltar</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (lotPendingCancellation) {
+                  void handleCancelLot(lotPendingCancellation.id)
+                }
+                setLotPendingCancellation(null)
+              }}
+              className="bg-destructive hover:bg-destructive/90"
+            >
+              Confirmar cancelamento
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Print preview */}
       {showPreview && labels.length > 0 && (
@@ -1224,29 +2199,49 @@ export function EtiquetasProvisoriasGenerator() {
                       height: "94px",
                     }}
                   >
-                    <QRCodeCanvas data={label.numero} size={60} className="rounded shrink-0" />
+                    <div
+                      className="flex items-center gap-2 h-full w-full"
+                      style={{
+                        transform: `translate(${zebraConfig.offsetXMm + zebraConfig.offsetColuna2Mm}px, ${zebraConfig.offsetYMm}px)`,
+                        padding: `${zebraConfig.innerPaddingMm}px`,
+                      }}
+                    >
+                    <QRCodeCanvas data={label.numero} size={Math.max(36, zebraConfig.qrSizeMm * 3.5)} className="rounded shrink-0" />
                     <div className="flex-1 min-w-0 flex flex-col justify-center h-full text-left">
-                      {customTitle && (
+                      {(customTitle || zebraConfig.title) && (
                         <p className="text-[8px] font-bold uppercase truncate border-b border-black mb-1">
-                          {customTitle}
+                          {customTitle || zebraConfig.title}
+                        </p>
+                      )}
+                      {zebraConfig.subtitle && (
+                        <p className="text-[7px] uppercase truncate mb-1">
+                          {zebraConfig.subtitle}
                         </p>
                       )}
                       <p className="text-[10px] font-mono font-bold tracking-wide leading-none">
                         {label.numero}
                       </p>
-                      {label.descricao && (
+                      {zebraConfig.showDescription && label.descricao && (
                         <p className="text-[8px] text-muted-foreground mt-0.5 truncate font-semibold">
                           {label.descricao}
                         </p>
                       )}
-                      {showLocation && label.localizacao && (
-                        <p className="text-[7px] text-muted-foreground mt-0.5 truncate leading-tight">
-                           {label.localizacao.departamento} {label.localizacao.sala ? `- ${label.localizacao.sala}` : ""}
+                      {zebraConfig.showEmenda && label.emenda && (
+                        <p className="text-[7px] text-muted-foreground mt-0.5 truncate">
+                          {label.emenda}
                         </p>
                       )}
-                      <p className="text-[6px] text-muted-foreground/60 mt-auto text-right uppercase">
-                        SisPatrimonio
-                      </p>
+                      {(showLocation || zebraConfig.showLocation) && label.localizacao && (
+                        <p className="text-[6px] text-muted-foreground mt-0.5 truncate">
+                          {[label.localizacao.departamento, label.localizacao.sala].filter(Boolean).join(" - ")}
+                        </p>
+                      )}
+                      {zebraConfig.showFooter && (
+                        <p className="text-[6px] text-muted-foreground/60 mt-auto text-right uppercase">
+                          SisPatrimonio
+                        </p>
+                      )}
+                    </div>
                     </div>
                   </div>
                 ))}

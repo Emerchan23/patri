@@ -1,49 +1,60 @@
 import { NextResponse } from "next/server"
 import { query } from "@/lib/db"
-import { withAuth } from "@/lib/api-auth"
+import { withRole } from "@/lib/api-auth"
 import { registrarLog } from "@/lib/audit"
 
 // GET /api/logs
-export const GET = withAuth(async (request) => {
+export const GET = withRole(["administrador"], async (request) => {
   const url = new URL(request.url)
   const acao = url.searchParams.get("acao")
   const usuario = url.searchParams.get("usuario")
   const busca = url.searchParams.get("busca")
   const dataInicio = url.searchParams.get("dataInicio")
   const dataFim = url.searchParams.get("dataFim")
-  const limit = parseInt(url.searchParams.get("limit") || "100")
+  const limit = parseInt(url.searchParams.get("limit") || "300")
+  const page = parseInt(url.searchParams.get("page") || "1")
+  const offset = (page - 1) * limit
 
+  let sqlCount = "SELECT COUNT(*) as total FROM audit_logs WHERE 1=1"
   let sql = "SELECT * FROM audit_logs WHERE 1=1"
   const params: unknown[] = []
 
   if (acao) {
     sql += " AND acao = ?"
+    sqlCount += " AND acao = ?"
     params.push(acao)
   }
 
   if (usuario) {
     sql += " AND usuario_nome LIKE ?"
+    sqlCount += " AND usuario_nome LIKE ?"
     params.push(`%${usuario}%`)
   }
 
   if (busca) {
     sql += " AND (descricao LIKE ? OR detalhes LIKE ? OR entidade_descricao LIKE ?)"
+    sqlCount += " AND (descricao LIKE ? OR detalhes LIKE ? OR entidade_descricao LIKE ?)"
     const term = `%${busca}%`
     params.push(term, term, term)
   }
 
   if (dataInicio) {
     sql += " AND data_hora >= ?"
+    sqlCount += " AND data_hora >= ?"
     params.push(dataInicio)
   }
 
   if (dataFim) {
     sql += " AND data_hora <= ?"
+    sqlCount += " AND data_hora <= ?"
     params.push(dataFim + " 23:59:59")
   }
 
-  sql += " ORDER BY data_hora DESC LIMIT ?"
-  params.push(limit)
+  const countResult = await query(sqlCount, params)
+  const totalItems = (countResult as any[])[0].total
+
+  sql += " ORDER BY data_hora DESC LIMIT ? OFFSET ?"
+  params.push(limit, offset)
 
   const rows = await query(sql, params)
   const logs = (rows as Record<string, unknown>[]).map((row) => ({
@@ -65,11 +76,19 @@ export const GET = withAuth(async (request) => {
     dadosNovos: row.dados_novos ? (typeof row.dados_novos === "string" ? JSON.parse(row.dados_novos as string) : row.dados_novos) : undefined,
   }))
 
-  return NextResponse.json(logs)
+  return NextResponse.json({
+    data: logs,
+    meta: {
+      total: totalItems,
+      page,
+      limit,
+      totalPages: Math.ceil(totalItems / limit),
+    }
+  })
 })
 
 // POST /api/logs - Create manual log entry (e.g. from frontend actions)
-export const POST = withAuth(async (request, { user }) => {
+export const POST = withRole(["administrador"], async (request, { user }) => {
   try {
     const body = await request.json()
     const { acao, descricao, detalhes, entidade } = body

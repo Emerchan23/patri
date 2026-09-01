@@ -3,7 +3,7 @@
 import * as React from "react"
 import { Check, ChevronsUpDown, Plus, Settings, Trash2 } from "lucide-react"
 import useSWR, { mutate } from "swr"
-import { fetcher, api } from "@/lib/api-client"
+import { fetcher, api, getApiErrorMessage } from "@/lib/api-client"
 
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -64,11 +64,12 @@ export function FornecedorSelector({
   value,
   onValueChange,
   className,
-  placeholder = "Selecione um fornecedor",
+  placeholder = "Selecione",
 }: FornecedorSelectorProps) {
   const [open, setOpen] = React.useState(false)
   const [manageOpen, setManageOpen] = React.useState(false)
-  const { data: fornecedores = [] } = useSWR<Fornecedor[]>("/fornecedores", fetcher)
+  const { data: fornecedoresData } = useSWR("/fornecedores?all=true", fetcher)
+  const fornecedores = (Array.isArray(fornecedoresData) ? fornecedoresData : (fornecedoresData?.data || [])) as Fornecedor[]
   const { toast } = useToast()
 
   // Form states
@@ -131,12 +132,11 @@ export function FornecedorSelector({
       } else {
         toast({ title: "Sucesso", description: "Fornecedor criado com sucesso!" })
         resetForm()
-        mutate("/fornecedores")
+        mutate("/fornecedores?all=true")
       }
     } catch (error: any) {
       console.error(error)
-      // O erro já deve vir tratado pelo api-client ou pelo backend, mas garantimos aqui
-      const msg = error.message || "Erro ao criar fornecedor."
+      const msg = getApiErrorMessage(error, "Erro ao criar fornecedor.")
       toast({ title: "Erro", description: msg, variant: "destructive" })
     } finally {
       setIsCreating(false)
@@ -153,7 +153,7 @@ export function FornecedorSelector({
       } else {
         toast({ title: "Sucesso", description: "Fornecedor removido com sucesso!" })
         if (value === nome) onValueChange("")
-        mutate("/fornecedores")
+        mutate("/fornecedores?all=true")
       }
     } catch (error) {
       toast({ title: "Erro", description: "Erro ao remover fornecedor", variant: "destructive" })
@@ -164,16 +164,16 @@ export function FornecedorSelector({
     <div className={cn("flex gap-2", className)}>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
-          <Button
-            variant="outline"
-            role="combobox"
-            aria-expanded={open}
-            className={cn("w-full justify-between font-normal", !value && "text-muted-foreground")}
-          >
-            {value || placeholder}
-            <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-          </Button>
-        </PopoverTrigger>
+        <Button
+          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          className={cn("w-full justify-between", className)}
+        >
+          {value || placeholder}
+          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
         <PopoverContent className="w-[--radix-popover-trigger-width] p-0">
           <Command>
             <CommandInput placeholder="Buscar fornecedor..." />

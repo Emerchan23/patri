@@ -45,8 +45,10 @@ export function Scanner() {
   const { toast } = useToast()
   const [manualCode, setManualCode] = useState("")
   const [foundAsset, setFoundAsset] = useState<Asset | null>(null)
+  const [candidateAssets, setCandidateAssets] = useState<Asset[]>([])
   const [roomAssets, setRoomAssets] = useState<Asset[]>([])
-  const [scanStatus, setScanStatus] = useState<"idle" | "scanning" | "found" | "not_found" | "room_found">("idle")
+  const [scanStatus, setScanStatus] = useState<"idle" | "scanning" | "found" | "not_found" | "room_found" | "ambiguous">("idle")
+  const [roomLookupLabel, setRoomLookupLabel] = useState("")
   const [isCameraRunning, setIsCameraRunning] = useState(false)
   const [cameraError, setCameraError] = useState<string | null>(null)
   const scannerRef = useRef<Html5Qrcode | null>(null)
@@ -229,7 +231,9 @@ export function Scanner() {
 
     setScanStatus("scanning")
     setFoundAsset(null)
+    setCandidateAssets([])
     setRoomAssets([])
+    setRoomLookupLabel("")
     setManualCode(trimmedCode)
 
     try {
@@ -260,13 +264,19 @@ export function Scanner() {
 
       // 1. Try to find as Asset
       // Use the clean search term (without zeros)
-      const assetRes = await fetch(`/api/bens?patrimonio=${encodeURIComponent(searchTerm)}`)
+      const assetRes = await fetch(`/api/bens?patrimonio=${encodeURIComponent(searchTerm)}&scanner_lookup=true`)
       const assetsResponse = await assetRes.json()
       const assets = assetsResponse.data || []
 
-      if (assets && assets.length > 0) {
+      if (assets && assets.length === 1) {
         setFoundAsset(assets[0])
         setScanStatus("found")
+        return
+      }
+
+      if (assets && assets.length > 1) {
+        setCandidateAssets(assets)
+        setScanStatus("ambiguous")
         return
       }
 
@@ -278,6 +288,7 @@ export function Scanner() {
 
       if (roomAssetsData && roomAssetsData.length > 0) {
         setRoomAssets(roomAssetsData)
+        setRoomLookupLabel(searchTerm)
         setScanStatus("room_found")
         return
       }
@@ -315,7 +326,7 @@ export function Scanner() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight text-balance">Escanear Patrimônio</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Busque um bem ou sala pelo QR Code
+          Busque um bem ou sala pelo QR Code ou digitando o código completo, só os últimos números, com ou sem PROV e hífens.
         </p>
       </div>
 
@@ -379,13 +390,13 @@ export function Scanner() {
             <CardHeader className="pb-3">
               <CardTitle className="text-sm">Busca Manual</CardTitle>
               <CardDescription className="text-xs">
-                Digite o número do patrimônio ou nome da sala
+                Digite o patrimônio completo, só o final do provisório ou o nome da sala
               </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-3">
               <div className="flex gap-2">
                 <Input
-                  placeholder="Código ou Sala..."
+                  placeholder="Ex: PROV-2026-00331, 00331, 331 ou Sala 101"
                   value={manualCode}
                   onChange={(e) => setManualCode(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleSearch()}
@@ -401,6 +412,7 @@ export function Scanner() {
                 <p className="text-[10px] uppercase font-semibold text-muted-foreground mb-2">Simulação Rápida</p>
                 <div className="flex flex-wrap gap-2">
                     <Button variant="outline" size="sm" className="h-6 text-xs" onClick={() => handleSearch("PAT-2024-00142")}>Bem: PAT-00142</Button>
+                    <Button variant="outline" size="sm" className="h-6 text-xs" onClick={() => handleSearch("00331")}>Prov: 00331</Button>
                     <Button variant="outline" size="sm" className="h-6 text-xs" onClick={() => handleSearch("Sala 101")}>Sala: 101</Button>
                 </div>
               </div>
@@ -444,8 +456,53 @@ export function Scanner() {
                   Nada encontrado
                 </p>
                 <p className="text-xs text-muted-foreground mt-1 text-center max-w-xs">
-                  Não encontramos nenhum bem ou sala com o código &quot;{manualCode}&quot;.
+                  Não encontramos nenhum bem ou sala com &quot;{manualCode}&quot;. Você pode tentar o código completo, só os últimos números do PROV ou o nome da sala.
                 </p>
+              </CardContent>
+            </Card>
+          )}
+
+          {scanStatus === "ambiguous" && (
+            <Card className="border-warning/40">
+              <CardHeader>
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="flex h-6 w-6 items-center justify-center rounded-full bg-warning text-warning-foreground">
+                    <Search className="h-3.5 w-3.5" />
+                  </div>
+                  <span className="text-sm font-semibold">Mais de um bem encontrado</span>
+                </div>
+                <CardTitle className="text-lg">Escolha o patrimônio correto</CardTitle>
+                <CardDescription>
+                  A busca por &quot;{manualCode}&quot; encontrou mais de um patrimônio provisório. Selecione o item certo abaixo.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-3">
+                  {candidateAssets.map((asset) => (
+                    <button
+                      key={asset.id}
+                      type="button"
+                      onClick={() => {
+                        setFoundAsset(asset)
+                        setScanStatus("found")
+                      }}
+                      className="w-full rounded-lg border p-3 text-left transition-colors hover:bg-muted/50"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="space-y-1">
+                          <p className="text-sm font-semibold">{asset.patrimonioProvisorio || asset.patrimonio}</p>
+                          <p className="text-sm">{asset.descricao}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {asset.localizacao.secretaria} - {asset.localizacao.departamento} - {asset.localizacao.sala}
+                          </p>
+                        </div>
+                        <Badge className={`${getStatusColor(asset.status)} text-xs`}>
+                          {getStatusLabel(asset.status)}
+                        </Badge>
+                      </div>
+                    </button>
+                  ))}
+                </div>
               </CardContent>
             </Card>
           )}
@@ -550,13 +607,6 @@ export function Scanner() {
                     Movimentar
                   </Button>
                   
-                  <Link href={`/bens/${foundAsset.id}/editar`}>
-                    <Button variant="outline" size="sm" className="gap-1.5">
-                        <Edit className="h-3.5 w-3.5" />
-                        Editar
-                    </Button>
-                  </Link>
-
                   <Button variant="outline" size="sm" className="gap-1.5" onClick={() => handleSearch(manualCode)}>
                     <ScanBarcode className="h-3.5 w-3.5" />
                     Atualizar
@@ -570,8 +620,8 @@ export function Scanner() {
           {scanStatus === "room_found" && (
              <Card>
                 <CardHeader>
-                    <CardTitle>Itens na Sala: {manualCode}</CardTitle>
-                    <CardDescription>{roomAssets.length} itens encontrados nesta localização</CardDescription>
+                    <CardTitle>Itens na Sala: {roomLookupLabel || manualCode}</CardTitle>
+                    <CardDescription>Busca resolvida como sala. {roomAssets.length} itens encontrados nesta localização.</CardDescription>
                 </CardHeader>
                 <CardContent>
                     <ScrollArea className="h-[400px] pr-4">
@@ -600,11 +650,6 @@ export function Scanner() {
                                         <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => handleMoveClick(asset)}>
                                             <ArrowRightLeft className="h-3 w-3 mr-1" /> Mover
                                         </Button>
-                                        <Link href={`/bens/${asset.id}/editar`}>
-                                            <Button size="sm" variant="ghost" className="h-7 text-xs">
-                                                <Edit className="h-3 w-3 mr-1" /> Editar
-                                            </Button>
-                                        </Link>
                                     </div>
                                 </div>
                             ))}

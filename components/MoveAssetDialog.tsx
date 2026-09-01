@@ -59,10 +59,16 @@ export function MoveAssetDialog({ asset, open, onOpenChange, onSuccess }: MoveAs
   const fetchLocations = async () => {
     try {
       setFetchingLocations(true)
-      const res = await fetch("/api/secretarias")
+      const res = await fetch("/api/secretarias?all=true")
       if (!res.ok) throw new Error("Falha ao carregar locais")
       const data = await res.json()
-      setSecretarias(data)
+      if (Array.isArray(data)) {
+        setSecretarias(data)
+      } else if (data.data && Array.isArray(data.data)) {
+        setSecretarias(data.data)
+      } else {
+        setSecretarias([])
+      }
     } catch (error) {
       console.error(error)
       toast({
@@ -108,9 +114,9 @@ export function MoveAssetDialog({ asset, open, onOpenChange, onSuccess }: MoveAs
         assetDescricao: asset.descricao,
         patrimonio: asset.patrimonio,
         de: {
-          secretaria: asset.localizacao.secretaria,
-          departamento: asset.localizacao.departamento,
-          sala: asset.localizacao.sala
+          secretaria: asset.localizacao?.secretaria || "-",
+          departamento: asset.localizacao?.departamento || "-",
+          sala: asset.localizacao?.sala || "-"
         },
         para: {
           secretaria: sec?.nome,
@@ -157,15 +163,20 @@ export function MoveAssetDialog({ asset, open, onOpenChange, onSuccess }: MoveAs
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[425px]">
+      <DialogContent className="sm:max-w-[720px]">
         <DialogHeader>
           <DialogTitle>Movimentar Bem</DialogTitle>
-          <DialogDescription>
-            Defina o novo local para: <strong>{asset.descricao}</strong> ({asset.patrimonio})
+          <DialogDescription className="break-words pr-6">
+            Defina o novo local para: <strong className="break-words">{asset.descricao}</strong> ({asset.patrimonio})
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="grid gap-4 py-4">
+          <div className="rounded-lg border bg-muted/40 p-3 text-sm">
+            <p className="font-medium break-words">{asset.descricao}</p>
+            <p className="text-xs text-muted-foreground font-mono mt-1">{asset.patrimonio}</p>
+          </div>
+
           <div className="grid gap-2">
             <Label>Nova Secretaria</Label>
             <SearchableSelect

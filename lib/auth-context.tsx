@@ -1,7 +1,9 @@
 "use client"
 
-import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react"
-import { getPermissions, type User, type Permissions } from "./auth"
+import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from "react"
+import { getPermissions, resolveUserPermissionOverrides, type User, type Permissions } from "./auth"
+import { onAuthExpired } from "./api-client"
+import { useToast } from "@/components/ui/use-toast"
 
 interface AuthContextType {
   user: User | null
@@ -29,6 +31,14 @@ function apiUserToUser(apiUser: Record<string, unknown>): User {
     avatar: apiUser.avatar as string,
     unidade: apiUser.unidade as User["unidade"],
     secretariasGerenciadas: apiUser.secretariasGerenciadas as string[] | undefined,
+    departamentosAssistente: apiUser.departamentosAssistente as string[] | undefined,
+    permissionOverrides: resolveUserPermissionOverrides({
+      role: apiUser.role as User["role"],
+      podeCadastrarBem: apiUser.podeCadastrarBem,
+      podeCadastroProvisorioUnidade: apiUser.podeCadastroProvisorioUnidade,
+      permissionOverrides: apiUser.permissionOverrides as User["permissionOverrides"] | undefined,
+    }),
+    permissions: apiUser.permissions as Permissions | undefined,
     criadoEm: apiUser.criadoEm as string,
     ultimoAcesso: apiUser.ultimoAcesso as string | undefined,
   }
@@ -37,39 +47,62 @@ function apiUserToUser(apiUser: Record<string, unknown>): User {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const { toast } = useToast()
+  const checkSessionRunId = useRef(0)
+  const loginInFlightRef = useRef(false)
+
+  // Monitor auth expiration
+  useEffect(() => {
+    const unsubscribe = onAuthExpired(() => {
+      // Only act if user is logged in to avoid multiple toasts/renders
+      if (user) {
+        setUser(null)
+        toast({
+          title: "Sessão expirada",
+          description: "Por favor, faça login novamente para continuar.",
+          variant: "destructive",
+        })
+      }
+    })
+    return () => unsubscribe()
+  }, [user, toast])
 
   // Check session on mount via /api/auth/me
   const checkSession = useCallback(async () => {
-    // Se ja estiver logado, nao precisa verificar novamente
-    if (user) {
-        setIsLoading(false)
-        return
-    }
+    const runId = ++checkSessionRunId.current
 
     try {
+      if (loginInFlightRef.current) return
       const res = await fetch("/api/auth/me", { credentials: "include" })
       if (res.ok) {
         const data = await res.json()
-        setUser(apiUserToUser(data.user))
+        if (runId === checkSessionRunId.current) {
+          setUser(apiUserToUser(data.user))
+        }
       } else {
-        // Se falhar (401), apenas define null, sem limpar nada agressivamente
-        // Apenas se user era diferente de null
-        if (user !== null) setUser(null)
+        if (runId === checkSessionRunId.current) {
+          setUser(null)
+        }
       }
     } catch {
-        if (user !== null) setUser(null)
+      if (runId === checkSessionRunId.current) {
+        setUser(null)
+      }
     } finally {
-      setIsLoading(false)
+      if (runId === checkSessionRunId.current) {
+        setIsLoading(false)
+      }
     }
-  }, [user])
+  }, [])
 
   useEffect(() => {
     checkSession()
   }, [checkSession])
 
-  const permissions = user ? getPermissions(user.role) : null
+  const permissions = user ? (user.permissions || getPermissions(user.role, user.permissionOverrides)) : null
 
   const login = useCallback(async (email: string, senha: string) => {
+    loginInFlightRef.current = true
     try {
       const res = await fetch("/api/auth/login", {
         method: "POST",
@@ -81,12 +114,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const data = await res.json()
 
       if (!res.ok) {
+        loginInFlightRef.current = false
         return { success: false, error: data.error || "Erro ao fazer login" }
       }
 
       setUser(apiUserToUser(data.user))
+      setIsLoading(false)
+      loginInFlightRef.current = false
       return { success: true }
     } catch {
+      loginInFlightRef.current = false
       return { success: false, error: "Erro de conexao com o servidor" }
     }
   }, [])

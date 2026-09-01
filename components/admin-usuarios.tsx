@@ -28,9 +28,10 @@ import { fetcher, api } from "@/lib/api-client"
 
 export function AdminUsuarios() {
   const { user: currentUser } = useAuth()
-  const { data: users = [], mutate } = useSWR("/usuarios", fetcher)
-  const { data: secretariasData } = useSWR("/secretarias", fetcher)
-  const secretariasList = secretariasData || []
+  const { data: usersData, mutate } = useSWR("/usuarios", fetcher)
+  const users = Array.isArray(usersData) ? usersData : (usersData?.data || [])
+  const { data: secretariasData } = useSWR("/secretarias?all=true", fetcher)
+  const secretariasList = Array.isArray(secretariasData) ? secretariasData : (secretariasData?.data || [])
 
   const [search, setSearch] = useState("")
   const [roleFilter, setRoleFilter] = useState<string>("todos")
@@ -47,9 +48,11 @@ export function AdminUsuarios() {
   const [newCargo, setNewCargo] = useState("")
   const [newUserRole, setNewUserRole] = useState<UserRole | "">("")
   const [newUserSecretaria, setNewUserSecretaria] = useState("")
-  const [newUserDepartamento, setNewUserDepartamento] = useState("")
+  const [newUserDepartamentos, setNewUserDepartamentos] = useState<string[]>([])
   const [newUserSecretariasGerenciadas, setNewUserSecretariasGerenciadas] = useState<string[]>([])
   const [newAcessoApp, setNewAcessoApp] = useState(false)
+  const [newPodeCadastrarBem, setNewPodeCadastrarBem] = useState(false)
+  const [newPodeCadastroProvisorioUnidade, setNewPodeCadastroProvisorioUnidade] = useState(false)
 
   const filtered = users.filter((u: any) => {
     const matchSearch = search === "" || u.nome?.toLowerCase().includes(search.toLowerCase()) || u.email?.toLowerCase().includes(search.toLowerCase()) || u.cargo?.toLowerCase().includes(search.toLowerCase())
@@ -75,9 +78,11 @@ export function AdminUsuarios() {
     setNewCargo("")
     setNewUserRole("")
     setNewUserSecretaria("")
-    setNewUserDepartamento("")
+    setNewUserDepartamentos([])
     setNewUserSecretariasGerenciadas([])
     setNewAcessoApp(false)
+    setNewPodeCadastrarBem(false)
+    setNewPodeCadastroProvisorioUnidade(false)
     setEditingId(null)
   }
 
@@ -95,7 +100,10 @@ export function AdminUsuarios() {
     setNewUserRole(user.role as UserRole)
     if (user.unidade) {
       setNewUserSecretaria(user.unidade.secretaria)
-      setNewUserDepartamento(user.unidade.departamento)
+      setNewUserDepartamentos(user.unidade.departamentos || (user.unidade.departamento ? [user.unidade.departamento] : []))
+    } else {
+      setNewUserSecretaria("")
+      setNewUserDepartamentos([])
     }
     if (user.secretariasGerenciadas) {
       setNewUserSecretariasGerenciadas(user.secretariasGerenciadas)
@@ -103,6 +111,8 @@ export function AdminUsuarios() {
       setNewUserSecretariasGerenciadas([])
     }
     setNewAcessoApp(user.acessoApp || false)
+    setNewPodeCadastrarBem(Boolean(user.podeCadastrarBem))
+    setNewPodeCadastroProvisorioUnidade(Boolean(user.podeCadastroProvisorioUnidade))
     setShowUserForm(true)
   }
 
@@ -126,9 +136,11 @@ export function AdminUsuarios() {
       const userData = {
         nome: newNome, email: newEmail, cargo: newCargo, role: newUserRole,
         secretaria: newUserSecretaria || undefined,
-        departamento: newUserDepartamento || undefined,
+        departamentosAssistente: newUserDepartamentos,
         secretariasGerenciadas: newUserSecretariasGerenciadas,
         acessoApp: newAcessoApp,
+        podeCadastrarBem: newUserRole === "assistente" ? newPodeCadastrarBem : null,
+        podeCadastroProvisorioUnidade: newUserRole === "assistente" ? newPodeCadastroProvisorioUnidade : null,
         senha: newSenha || undefined // Only send if provided
       }
 
@@ -187,6 +199,26 @@ export function AdminUsuarios() {
                 />
                 <Label htmlFor="acessoApp">Permitir acesso ao aplicativo móvel</Label>
               </div>
+              {newUserRole === "assistente" && (
+                <div className="flex items-center space-x-2 py-2">
+                  <Checkbox
+                    id="podeCadastrarBem"
+                    checked={newPodeCadastrarBem}
+                    onCheckedChange={(checked) => setNewPodeCadastrarBem(!!checked)}
+                  />
+                  <Label htmlFor="podeCadastrarBem">Permitir cadastrar novos bens</Label>
+                </div>
+              )}
+              {newUserRole === "assistente" && (
+                <div className="flex items-center space-x-2 py-2">
+                  <Checkbox
+                    id="podeCadastroProvisorioUnidade"
+                    checked={newPodeCadastroProvisorioUnidade}
+                    onCheckedChange={(checked) => setNewPodeCadastroProvisorioUnidade(!!checked)}
+                  />
+                  <Label htmlFor="podeCadastroProvisorioUnidade">Permitir cadastro provisório da unidade</Label>
+                </div>
+              )}
               <div className="flex flex-col gap-2">
                 <Label required>Perfil de Acesso</Label>
                 <div className="flex flex-col gap-2">
@@ -230,16 +262,35 @@ export function AdminUsuarios() {
 
               {newUserRole === "assistente" && (
                 <Card className="border-accent/30 bg-accent/5">
-                  <CardHeader className="pb-3"><div className="flex items-center gap-2"><Building2 className="h-4 w-4 text-accent" /><CardTitle className="text-sm">Unidade Vinculada</CardTitle></div><CardDescription className="text-xs">O assistente so tera acesso aos bens desta unidade</CardDescription></CardHeader>
+                  <CardHeader className="pb-3"><div className="flex items-center gap-2"><Building2 className="h-4 w-4 text-accent" /><CardTitle className="text-sm">Unidade Vinculada</CardTitle></div><CardDescription className="text-xs">O assistente tera acesso apenas a esta secretaria e aos departamentos marcados abaixo</CardDescription></CardHeader>
                   <CardContent className="flex flex-col gap-3">
-                    <div className="flex flex-col gap-2"><Label required>Secretaria</Label><Select value={newUserSecretaria} onValueChange={(v) => { setNewUserSecretaria(v); setNewUserDepartamento(""); }}><SelectTrigger><SelectValue placeholder="Selecione a secretaria" /></SelectTrigger><SelectContent>{secretariasList.map((s: any) => (<SelectItem key={s.nome} value={s.nome}>{s.nome}</SelectItem>))}</SelectContent></Select></div>
-                    <div className="flex flex-col gap-2"><Label required>Departamento</Label><Select value={newUserDepartamento} onValueChange={setNewUserDepartamento} disabled={!newUserSecretaria}><SelectTrigger><SelectValue placeholder="Selecione o departamento" /></SelectTrigger><SelectContent>{selectedSecretaria?.departamentos?.map((d: any) => (<SelectItem key={d.nome} value={d.nome}>{d.nome}</SelectItem>))}</SelectContent></Select></div>
+                    <div className="flex flex-col gap-2"><Label required>Secretaria</Label><Select value={newUserSecretaria} onValueChange={(v) => { setNewUserSecretaria(v); setNewUserDepartamentos([]); }}><SelectTrigger><SelectValue placeholder="Selecione a secretaria" /></SelectTrigger><SelectContent>{secretariasList.map((s: any) => (<SelectItem key={s.nome} value={s.nome}>{s.nome}</SelectItem>))}</SelectContent></Select></div>
+                    <div className="flex flex-col gap-2">
+                      <Label required>Departamentos Permitidos</Label>
+                      <div className="rounded-lg border bg-background p-3 max-h-48 overflow-y-auto">
+                        {selectedSecretaria?.departamentos?.length ? selectedSecretaria.departamentos.map((d: any) => (
+                          <div key={d.nome} className="flex items-center space-x-2 p-1 hover:bg-muted/50 rounded">
+                            <Checkbox
+                              id={`assist-dep-${d.nome}`}
+                              checked={newUserDepartamentos.includes(d.nome)}
+                              onCheckedChange={(checked) => {
+                                if (checked) setNewUserDepartamentos([...newUserDepartamentos, d.nome])
+                                else setNewUserDepartamentos(newUserDepartamentos.filter((name) => name !== d.nome))
+                              }}
+                            />
+                            <Label htmlFor={`assist-dep-${d.nome}`} className="text-sm font-normal cursor-pointer flex-1">{d.nome}</Label>
+                          </div>
+                        )) : (
+                          <p className="text-xs text-muted-foreground">{newUserSecretaria ? "Nenhum departamento encontrado nesta secretaria." : "Selecione uma secretaria primeiro."}</p>
+                        )}
+                      </div>
+                    </div>
                   </CardContent>
                 </Card>
               )}
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => { setShowUserForm(false); resetForm(); }}>Cancelar</Button>
-                <Button onClick={handleSaveUser} disabled={saving || !newNome || !newEmail || (!editingId && !newSenha) || !newCargo || !newUserRole} className="gap-2">
+                <Button onClick={handleSaveUser} disabled={saving || !newNome || !newEmail || (!editingId && !newSenha) || !newCargo || !newUserRole || (newUserRole === "assistente" && (!newUserSecretaria || newUserDepartamentos.length === 0))} className="gap-2">
                   {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : editingId ? <Edit className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
                   {editingId ? "Salvar Alteracoes" : "Cadastrar"}
                 </Button>
@@ -265,7 +316,7 @@ export function AdminUsuarios() {
             <TableCell><div className="flex items-center gap-3"><div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-semibold text-primary">{u.avatar}</div><div><p className="text-sm font-medium">{u.nome}</p><p className="text-xs text-muted-foreground">{u.email}</p></div></div></TableCell>
             <TableCell><Badge className={`text-xs ${roleColors[u.role as UserRole] || ""}`}>{roleLabels[u.role as UserRole] || u.role}</Badge></TableCell>
             <TableCell className="hidden md:table-cell">
-              {u.role === "assistente" && u.unidade ? (<div className="flex flex-col"><span className="text-xs text-muted-foreground">{u.unidade.secretaria?.replace("Secretaria de ", "Sec. ")}</span><span className="text-xs font-medium">{u.unidade.departamento}</span></div>) : u.role === "gestor" ? (<span className="text-xs text-muted-foreground">{u.secretariasGerenciadas?.length || 0} secretarias</span>) : (<span className="text-xs text-muted-foreground">Acesso global</span>)}
+              {u.role === "assistente" && u.unidade ? (<div className="flex flex-col"><span className="text-xs text-muted-foreground">{u.unidade.secretaria?.replace("Secretaria de ", "Sec. ")}</span><span className="text-xs font-medium">{u.unidade.departamentos?.length || (u.unidade.departamento ? 1 : 0)} departamento(s)</span></div>) : u.role === "gestor" ? (<span className="text-xs text-muted-foreground">{u.secretariasGerenciadas?.length || 0} secretarias</span>) : (<span className="text-xs text-muted-foreground">Acesso global</span>)}
             </TableCell>
             <TableCell className="hidden lg:table-cell"><span className="text-xs text-muted-foreground">{u.ultimoAcesso ? formatDate(u.ultimoAcesso) : "Nunca"}</span></TableCell>
             <TableCell>{u.ativo ? (<Badge variant="outline" className="text-xs border-success/50 text-success"><CheckCircle2 className="h-3 w-3 mr-1" />Ativo</Badge>) : (<Badge variant="outline" className="text-xs border-destructive/50 text-destructive"><XCircle className="h-3 w-3 mr-1" />Inativo</Badge>)}</TableCell>
@@ -301,7 +352,7 @@ export function AdminUsuarios() {
                   <div className="flex items-start gap-3"><Shield className="h-4 w-4 mt-0.5 text-muted-foreground" /><div><p className="text-xs text-muted-foreground">Acesso ao App</p><p className="text-sm font-medium">{selectedUser.acessoApp ? "Sim" : "Não"}</p></div></div>
                   <div className="flex items-start gap-3"><Calendar className="h-4 w-4 mt-0.5 text-muted-foreground" /><div><p className="text-xs text-muted-foreground">Criado em</p><p className="text-sm font-medium">{formatDate(selectedUser.criadoEm)}</p></div></div>
                   {selectedUser.ultimoAcesso && (<div className="flex items-start gap-3"><Calendar className="h-4 w-4 mt-0.5 text-muted-foreground" /><div><p className="text-xs text-muted-foreground">Ultimo Acesso</p><p className="text-sm font-medium">{formatDate(selectedUser.ultimoAcesso)}</p></div></div>)}
-                  {selectedUser.role === "assistente" && selectedUser.unidade && (<div className="flex items-start gap-3"><Building2 className="h-4 w-4 mt-0.5 text-muted-foreground" /><div><p className="text-xs text-muted-foreground">Unidade Vinculada</p><p className="text-sm font-medium">{selectedUser.unidade.secretaria}</p><p className="text-xs text-muted-foreground">{selectedUser.unidade.departamento}</p></div></div>)}
+                  {selectedUser.role === "assistente" && selectedUser.unidade && (<div className="flex items-start gap-3"><Building2 className="h-4 w-4 mt-0.5 text-muted-foreground" /><div><p className="text-xs text-muted-foreground">Unidade Vinculada</p><p className="text-sm font-medium">{selectedUser.unidade.secretaria}</p><div className="flex flex-wrap gap-1.5 mt-1">{(selectedUser.unidade.departamentos || (selectedUser.unidade.departamento ? [selectedUser.unidade.departamento] : [])).map((d: string) => (<Badge key={d} variant="secondary" className="text-[10px]">{d}</Badge>))}</div></div></div>)}
                   {selectedUser.role === "gestor" && selectedUser.secretariasGerenciadas && (<div className="flex items-start gap-3"><Building2 className="h-4 w-4 mt-0.5 text-muted-foreground" /><div><p className="text-xs text-muted-foreground">Secretarias Gerenciadas</p><div className="flex flex-wrap gap-1.5 mt-1">{selectedUser.secretariasGerenciadas.map((s: string) => (<Badge key={s} variant="secondary" className="text-[10px]">{s.replace("Secretaria de ", "")}</Badge>))}</div></div></div>)}
                 </div>
                 <div className="rounded-lg border border-border p-3"><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Resumo de Permissoes</p><p className="text-xs text-muted-foreground leading-relaxed">{roleDescriptions[selectedUser.role as UserRole] || ""}</p></div>

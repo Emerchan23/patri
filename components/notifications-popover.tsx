@@ -37,7 +37,7 @@ export function NotificationsPopover() {
       // Don't set loading on poll to avoid flickering
       if (notificacoes.length === 0) setLoading(true)
       const data = await api.getNotificacoes()
-      setNotificacoes(data)
+      setNotificacoes(Array.isArray(data) ? data : [])
     } catch (error) {
       console.error("Erro ao carregar notificacoes:", error)
     } finally {

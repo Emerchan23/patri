@@ -36,11 +36,15 @@ export function LoginPage() {
       setError("Preencha todos os campos")
       return
     }
+    
+    // Prevent multiple clicks immediately
     setLoading(true)
+    
     try {
       const result = await login(email, senha)
       if (!result.success) {
         setError(result.error || "Erro ao fazer login")
+        setLoading(false) // Only stop loading on error
       } else {
         // Sucesso no login - Salvar preferência
         if (rememberMe) {
@@ -48,10 +52,10 @@ export function LoginPage() {
         } else {
             localStorage.removeItem("auth_remember_email")
         }
+        // Don't stop loading here to prevent button flicker before redirect
       }
     } catch {
       setError("Erro de conexao com o servidor")
-    } finally {
       setLoading(false)
     }
   }
@@ -101,11 +105,11 @@ export function LoginPage() {
                   <Label htmlFor="email" className="text-xs font-semibold uppercase text-muted-foreground tracking-wider ml-1">Usuário / Email</Label>
                   <Input
                     id="email"
-                    type="email"
+                    type="text"
                     placeholder="Digite seu usuário"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    autoComplete="email"
+                    autoComplete="username"
                     className="bg-muted/50 border-muted-foreground/20 focus:bg-background h-11 transition-all"
                   />
                 </div>

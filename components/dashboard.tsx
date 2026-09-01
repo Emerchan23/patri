@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import useSWR from "swr"
 import {
   Package,
@@ -57,13 +57,32 @@ export function Dashboard() {
   const [selectedSecretaria, setSelectedSecretaria] = useState<string>("all")
   const [selectedDepartamento, setSelectedDepartamento] = useState<string>("all")
   const [selectedSala, setSelectedSala] = useState<string>("all")
+  const [hasLoadedDashboardOnce, setHasLoadedDashboardOnce] = useState(false)
+
+  // Carregar do localStorage ao iniciar
+  useEffect(() => {
+    const savedSecretaria = localStorage.getItem("dashboard_selected_secretaria")
+    if (savedSecretaria) {
+      setSelectedSecretaria(savedSecretaria)
+    }
+  }, [])
 
   // Fetch stats with filter if a secretariat is selected
   const statsUrl = selectedSecretaria !== "all" ? `secretaria=${encodeURIComponent(selectedSecretaria)}` : ""
-  const { data: stats, isLoading, error } = useSWR(["dashboard-stats", statsUrl], () => api.dashboardStats(statsUrl), { refreshInterval: 60000 })
+  const { data: stats, isLoading, isValidating, error, mutate: retryDashboard } = useSWR(
+    ["dashboard-stats", statsUrl],
+    () => api.dashboardStats(statsUrl),
+    {
+      refreshInterval: 60000,
+      keepPreviousData: true,
+      errorRetryCount: 3,
+      errorRetryInterval: 1500,
+    }
+  )
   
   // Fetch hierarchy for dropdowns
-  const { data: secretarias } = useSWR("secretarias-list", () => api.getSecretarias())
+  const { data: secretariasData } = useSWR("secretarias-list", () => api.getSecretarias("all=true"))
+  const secretarias = Array.isArray(secretariasData) ? secretariasData : (secretariasData?.data || [])
   
   // Fetch filtered assets list when drill-down is active
   const shouldFetchAssets = selectedSecretaria !== "all"
@@ -92,7 +111,13 @@ export function Dashboard() {
     return dep?.salas || []
   }, [selectedDepartamento, departamentoOptions])
 
-  if (isLoading) {
+  useEffect(() => {
+    if (stats) {
+      setHasLoadedDashboardOnce(true)
+    }
+  }, [stats])
+
+  if (!stats && (isLoading || isValidating || !hasLoadedDashboardOnce)) {
     return (
       <div className="flex items-center justify-center h-64">
         <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -102,22 +127,32 @@ export function Dashboard() {
 
   if (error || !stats) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <p className="text-muted-foreground">Erro ao carregar dados do dashboard. Verifique a conexao com o banco de dados.</p>
+      <div className="flex h-64 flex-col items-center justify-center gap-3 text-center">
+        <p className="text-muted-foreground">
+          Nao foi possivel concluir a primeira carga do dashboard agora. Estamos tentando novamente.
+        </p>
+        <Button variant="outline" onClick={() => retryDashboard()}>
+          Tentar novamente
+        </Button>
       </div>
     )
   }
 
-  const categoryData = stats.porCategoria || []
-  const secretariaData = stats.porSecretaria || []
-  const departamentoData = stats.porDepartamento || []
-  const recentMovements = stats.movimentacoesRecentes || []
-  const provisorios = stats.provisorios || []
+  const categoryData = stats?.porCategoria || []
+  const secretariaData = stats?.porSecretaria || []
+  const departamentoData = stats?.porDepartamento || []
+  const recentMovements = stats?.movimentacoesRecentes || []
+  const provisorios = stats?.provisorios || []
 
   const handleSecretariaChange = (value: string) => {
     setSelectedSecretaria(value)
     setSelectedDepartamento("all")
     setSelectedSala("all")
+    if (value === "all") {
+      localStorage.removeItem("dashboard_selected_secretaria")
+    } else {
+      localStorage.setItem("dashboard_selected_secretaria", value)
+    }
   }
 
   const handleDepartamentoChange = (value: string) => {

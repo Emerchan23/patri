@@ -9,8 +9,13 @@ export const PUT = withAuth(async (request, { user, params }) => {
   const body = await request.json()
   const slug = (body.nome as string).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "")
   
-  const existing = await queryOne<{ nome: string; descricao: string }>("SELECT nome, descricao FROM categorias WHERE id = ?", [id])
+  const existing = await queryOne<{ nome: string; descricao: string; slug: string }>("SELECT nome, slug, descricao FROM categorias WHERE id = ?", [id])
   
+  // Cascading update for bens if slug changes
+  if (existing && existing.slug !== slug) {
+      await execute("UPDATE bens SET categoria_slug = ? WHERE categoria_slug = ?", [slug, existing.slug])
+  }
+
   await execute("UPDATE categorias SET nome=?, slug=?, descricao=? WHERE id=?", [body.nome, slug, body.descricao || null, id])
 
   await registrarLog({
@@ -33,7 +38,23 @@ export const PUT = withAuth(async (request, { user, params }) => {
 export const DELETE = withAuth(async (_request, { user, params }) => {
   const id = params?.id
   
-  const existing = await queryOne<{ nome: string }>("SELECT nome FROM categorias WHERE id = ?", [id])
+  const existing = await queryOne<{ nome: string; slug: string }>("SELECT nome, slug FROM categorias WHERE id = ?", [id])
+
+  if (!existing) {
+    return NextResponse.json({ error: "Categoria não encontrada." }, { status: 404 })
+  }
+
+  // Check for usage in Assets
+  const usage = await queryOne<{ count: number }>(
+    "SELECT COUNT(*) as count FROM bens WHERE categoria_slug = ?", 
+    [existing.slug]
+  )
+
+  if (usage && usage.count > 0) {
+    return NextResponse.json({ 
+      error: `Não é possível excluir a categoria "${existing.nome}" pois ela está vinculada a ${usage.count} bem(ns).` 
+    }, { status: 400 })
+  }
 
   await execute("DELETE FROM categorias WHERE id = ?", [id])
 

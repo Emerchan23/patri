@@ -6,6 +6,7 @@ import { useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import {
   Select,
   SelectContent,
@@ -45,6 +46,8 @@ import {
   gerarRelatorioTermoResponsabilidade,
   gerarRelatorioBaixas,
   gerarRelatorioProvisorio,
+  gerarRelatorioPorDepartamento,
+  gerarRelatorioPorSala,
 } from "@/lib/pdf-generator"
 import { api, fetcher } from "@/lib/api-client"
 import useSWR from "swr"
@@ -67,7 +70,7 @@ const reportTypes: ReportType[] = [
     descricao: "Lista completa de todos os bens patrimoniais com valores e localizacao",
     icon: Package,
     cor: "bg-primary/10 text-primary",
-    filtros: ["secretaria", "categoria", "status"],
+    filtros: ["secretaria", "grupo", "categoria", "status"],
   },
   {
     id: "secretaria",
@@ -78,12 +81,28 @@ const reportTypes: ReportType[] = [
     filtros: ["secretaria"],
   },
   {
+    id: "departamento",
+    nome: "Relatorio por Departamento",
+    descricao: "Bens agrupados por sala dentro de um departamento especifico",
+    icon: Building2,
+    cor: "bg-purple-500/10 text-purple-500",
+    filtros: ["secretaria", "departamento"],
+  },
+  {
+    id: "sala",
+    nome: "Relatorio por Sala",
+    descricao: "Lista de bens localizados em uma sala especifica",
+    icon: Building2,
+    cor: "bg-pink-500/10 text-pink-500",
+    filtros: ["secretaria", "departamento", "sala"],
+  },
+  {
     id: "movimentacoes",
     nome: "Movimentacoes",
     descricao: "Historico de transferencias de bens entre setores e departamentos",
     icon: ArrowRightLeft,
     cor: "bg-accent/10 text-accent",
-    filtros: [],
+    filtros: ["secretaria", "departamento", "sala"],
   },
   {
     id: "termo",
@@ -107,7 +126,15 @@ const reportTypes: ReportType[] = [
     descricao: "Bens aguardando atribuicao de numero de patrimonio definitivo",
     icon: Clock,
     cor: "bg-warning/10 text-warning",
-    filtros: [],
+    filtros: ["secretaria", "departamento", "sala"],
+  },
+  {
+    id: "emenda",
+    nome: "Bens por Emenda Parlamentar",
+    descricao: "Relatorio de bens adquiridos atraves de Emenda Parlamentar",
+    icon: FileText,
+    cor: "bg-blue-500/10 text-blue-500",
+    filtros: ["emenda", "secretaria", "departamento", "sala"],
   },
 ]
 
@@ -118,15 +145,23 @@ export function Relatorios() {
 
   // Filter state
   const [filterSecretaria, setFilterSecretaria] = useState("todas")
+  const [filterDepartamento, setFilterDepartamento] = useState("todos")
+  const [filterSala, setFilterSala] = useState("todos")
+  const [filterGrupo, setFilterGrupo] = useState("todos")
   const [filterCategoria, setFilterCategoria] = useState("todas")
   const [filterStatus, setFilterStatus] = useState("todos")
   const [filterBem, setFilterBem] = useState("")
-
+  const [filterEmenda, setFilterEmenda] = useState("")
+  
   // Load data from API
   const { data: bensResult } = useSWR("/bens?veiculos=false&limit=9999", fetcher)
   const { data: veiculos = [] } = useSWR<Asset[]>("/veiculos", fetcher)
   const { data: movimentacoesResult } = useSWR("/movimentacoes?limit=9999", fetcher)
-  const { data: secretarias = [] } = useSWR<any[]>("/secretarias", fetcher)
+  const { data: secretariasData } = useSWR("/secretarias?all=true", fetcher)
+  const secretarias = (Array.isArray(secretariasData) ? secretariasData : (secretariasData?.data || [])) as any[]
+  
+  const { data: gruposData } = useSWR("/api/grupos?all=true", fetcher)
+  const grupos = (Array.isArray(gruposData) ? gruposData : (gruposData?.data || [])) as any[]
 
   const bens = bensResult?.data || []
   const movimentacoes = movimentacoesResult?.data || []
@@ -137,12 +172,69 @@ export function Relatorios() {
 
   const allAssets = [...bens, ...veiculos]
 
+  // Computed lists based on selection
+  const selectedSec = secretarias.find((s) => s.nome.replace("Secretaria de ", "") === filterSecretaria || s.nome === filterSecretaria)
+  const departamentosList = filterSecretaria === "todas" 
+    ? secretarias.flatMap((s) => s.departamentos || [])
+    : selectedSec?.departamentos || []
+  
+  const selectedDep = departamentosList.find((d: any) => d.nome === filterDepartamento)
+  const salasList = filterDepartamento === "todos"
+    ? departamentosList.flatMap((d: any) => d.salas || [])
+    : selectedDep?.salas || []
+
+  const assetMatchesLocationFilter = (asset: Asset) => {
+    const secretariaNome = asset.localizacao?.secretaria || asset.secretaria || ""
+    const departamentoNome = asset.localizacao?.departamento || asset.departamento || ""
+    const salaNome = asset.localizacao?.sala || asset.sala || ""
+
+    if (filterSecretaria !== "todas" && secretariaNome !== filterSecretaria) return false
+    if (filterDepartamento !== "todos" && departamentoNome !== filterDepartamento) return false
+    if (filterSala !== "todos" && salaNome !== filterSala) return false
+    return true
+  }
+
+  const movementMatchesLocationFilter = (movement: Movement) => {
+    const origemSecretaria = movement.de?.secretaria || movement.de_secretaria || ""
+    const destinoSecretaria = movement.para?.secretaria || movement.para_secretaria || ""
+    const origemDepartamento = movement.de?.departamento || movement.de_departamento || ""
+    const destinoDepartamento = movement.para?.departamento || movement.para_departamento || ""
+    const origemSala = movement.de?.sala || movement.de_sala || ""
+    const destinoSala = movement.para?.sala || movement.para_sala || ""
+
+    if (
+      filterSecretaria !== "todas" &&
+      origemSecretaria !== filterSecretaria &&
+      destinoSecretaria !== filterSecretaria
+    ) {
+      return false
+    }
+
+    if (
+      filterDepartamento !== "todos" &&
+      origemDepartamento !== filterDepartamento &&
+      destinoDepartamento !== filterDepartamento
+    ) {
+      return false
+    }
+
+    if (filterSala !== "todos" && origemSala !== filterSala && destinoSala !== filterSala) {
+      return false
+    }
+
+    return true
+  }
+
   const openReport = (report: ReportType) => {
     setSelectedReport(report)
     setFilterSecretaria("todas")
+    setFilterDepartamento("todos")
+    setFilterSala("todos")
+    setFilterGrupo("todos")
     setFilterCategoria("todas")
     setFilterStatus("todos")
     setFilterBem("")
+    setFilterEmenda("")
     setDialogOpen(true)
   }
 
@@ -157,31 +249,38 @@ export function Relatorios() {
           gerarRelatorioInventarioGeral(allAssets, {
             ...options,
             secretaria: filterSecretaria,
+            departamento: filterDepartamento,
+            grupo: filterGrupo,
             categoria: filterCategoria,
             status: filterStatus,
           })
           break
         case "secretaria": {
-          if (filterSecretaria === "todas" && selectedReport.filtros.includes("secretaria")) {
-              // Just a warning, or let it generate for all?
-              // The original code defaults to "Administracao" if "todas".
-              // Let's keep it but maybe warn if that's not intended.
-              // Actually, existing logic: const secNome = filterSecretaria === "todas" ? "Administracao" : filterSecretaria
-          }
-          const secNome = filterSecretaria === "todas" ? "Administracao" : filterSecretaria
+          const secNome = filterSecretaria === "todas" ? "todas" : filterSecretaria
           gerarRelatorioPorSecretaria(allAssets, secNome, options)
           break
         }
+        case "departamento": {
+          const secNomeDep = filterSecretaria === "todas" ? "todas" : filterSecretaria
+          gerarRelatorioPorDepartamento(allAssets, filterDepartamento, secNomeDep, options)
+          break
+        }
+        case "sala": {
+          const secNomeSala = filterSecretaria === "todas" ? "todas" : filterSecretaria
+          gerarRelatorioPorSala(allAssets, filterSala, filterDepartamento, secNomeSala, options)
+          break
+        }
         case "movimentacoes":
-          if (movimentacoes.length === 0) {
+          const filteredMovimentacoes = movimentacoes.filter(movementMatchesLocationFilter)
+          if (filteredMovimentacoes.length === 0) {
             toast({
               title: "Sem dados",
-              description: "Não há movimentações para gerar relatório.",
+              description: "Não há movimentações para gerar relatório com os filtros selecionados.",
               variant: "destructive",
             })
             return
           }
-          gerarRelatorioMovimentacoes(movimentacoes, options)
+          gerarRelatorioMovimentacoes(filteredMovimentacoes, options)
           break
         case "termo": {
           if (!filterBem) {
@@ -210,13 +309,32 @@ export function Relatorios() {
           gerarRelatorioBaixas(allAssets, options)
           break
         case "provisorios":
-          const provs = allAssets.filter(a => a.patrimonioTipo === 'provisorio')
+          const provs = allAssets.filter(a => a.patrimonioTipo === 'provisorio' && assetMatchesLocationFilter(a))
           if (provs.length === 0) {
-             toast({ title: "Sem dados", description: "Não há bens provisórios.", variant: "destructive" })
+             toast({ title: "Sem dados", description: "Não há bens provisórios com os filtros selecionados.", variant: "destructive" })
              return
           }
-          gerarRelatorioProvisorio(allAssets, options)
+          gerarRelatorioProvisorio(provs, options)
           break
+        case "emenda":
+            const emendaFiltro = filterEmenda.trim().toLowerCase()
+            const bensEmenda = allAssets.filter((a) => {
+              const emenda = a.emendaParlamentar?.trim() || ""
+              if (!emenda) return false
+              if (emendaFiltro && !emenda.toLowerCase().includes(emendaFiltro)) return false
+              return assetMatchesLocationFilter(a)
+            })
+            if (bensEmenda.length === 0) {
+                toast({ title: "Sem dados", description: "Não há bens vinculados a emendas com os filtros selecionados.", variant: "destructive" })
+                return
+            }
+            gerarRelatorioInventarioGeral(bensEmenda, {
+                ...options,
+                titulo: filterEmenda ? `Relatório de Emenda: ${filterEmenda}` : "Relatório de Bens por Emenda Parlamentar",
+                secretaria: filterSecretaria,
+                departamento: filterDepartamento,
+              })
+            break
       }
       
       toast({
@@ -331,105 +449,169 @@ export function Relatorios() {
 
       {/* Generate Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-3">
-              {selectedReport && (
-                <>
-                  <div className={`flex h-9 w-9 items-center justify-center rounded-lg ${selectedReport.cor}`}>
-                    <selectedReport.icon className="h-4 w-4" />
-                  </div>
-                  {selectedReport.nome}
-                </>
-              )}
-            </DialogTitle>
-          </DialogHeader>
+        <DialogContent className="max-w-lg h-[90vh] flex flex-col p-0 gap-0">
+          <div className="p-6 pb-4 border-b">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-3">
+                {selectedReport && (
+                  <>
+                    <div className={`flex h-9 w-9 items-center justify-center rounded-lg ${selectedReport.cor}`}>
+                      <selectedReport.icon className="h-4 w-4" />
+                    </div>
+                    {selectedReport.nome}
+                  </>
+                )}
+              </DialogTitle>
+            </DialogHeader>
+          </div>
 
-          {selectedReport && (
-            <div className="flex flex-col gap-6 mt-2">
-              <p className="text-sm text-muted-foreground">{selectedReport.descricao}</p>
+          <div className="flex-1 overflow-y-auto px-6 py-6">
+            {selectedReport && (
+              <div className="flex flex-col gap-6">
+                <p className="text-sm text-muted-foreground">{selectedReport.descricao}</p>
 
-              {/* Filters */}
-              {selectedReport.filtros.length > 0 && (
-                <div className="flex flex-col gap-4">
-                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    Filtros do Relatorio
-                  </p>
+                {/* Filters */}
+                {selectedReport.filtros.length > 0 && (
+                  <div className="flex flex-col gap-4">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                      Filtros do Relatorio
+                    </p>
 
-                  <div className="space-y-4">
-                    {selectedReport.filtros.includes("secretaria") && (
-                      <div className="space-y-2">
+                    <div className="space-y-4">
+                      {selectedReport.filtros.includes("secretaria") && (
+                        <div className="space-y-2">
                         <label className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70" htmlFor="filter-sec">Secretaria</label>
-                        <Select value={filterSecretaria} onValueChange={setFilterSecretaria}>
-                          <SelectTrigger id="filter-sec" className="w-full">
-                            <SelectValue placeholder="Selecione" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="todas">Todas as Secretarias</SelectItem>
-                            {secretarias.map((s) => {
+                        <SearchableSelect 
+                          value={filterSecretaria} 
+                          onValueChange={(v) => { setFilterSecretaria(v); setFilterDepartamento("todos"); setFilterSala("todos"); }}
+                          placeholder="Selecione a secretaria..."
+                          searchPlaceholder="Buscar secretaria..."
+                          items={[
+                            { value: "todas", label: "Todas as Secretarias" },
+                            ...secretarias.map((s) => {
                               const nome = s.nome.replace("Secretaria de ", "")
-                              return (
-                                <SelectItem key={s.nome} value={nome}>
-                                  Sec. de {nome}
-                                </SelectItem>
-                              )
-                            })}
-                          </SelectContent>
-                        </Select>
+                              return { value: nome, label: `Sec. de ${nome}`, searchTerms: s.nome }
+                            })
+                          ]}
+                        />
+                      </div>
+                    )}
+
+                    {selectedReport.filtros.includes("departamento") && (
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70" htmlFor="filter-dep">Departamento</label>
+                        <SearchableSelect 
+                          value={filterDepartamento} 
+                          onValueChange={(v) => { setFilterDepartamento(v); setFilterSala("todos"); }}
+                          placeholder="Selecione o departamento..."
+                          searchPlaceholder="Buscar departamento..."
+                          items={[
+                            { value: "todos", label: "Todos os Departamentos" },
+                            ...departamentosList.map((d: any) => ({ value: d.nome, label: d.nome }))
+                          ]}
+                        />
+                      </div>
+                    )}
+
+                    {selectedReport.filtros.includes("sala") && (
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70" htmlFor="filter-sala">Sala</label>
+                        <SearchableSelect 
+                          value={filterSala} 
+                          onValueChange={setFilterSala}
+                          placeholder="Selecione a sala..."
+                          searchPlaceholder="Buscar sala..."
+                          items={[
+                            { value: "todos", label: "Todas as Salas" },
+                            ...salasList.map((s: any) => ({ value: s.nome, label: s.nome }))
+                          ]}
+                        />
+                      </div>
+                    )}
+
+                    {selectedReport.filtros.includes("grupo") && (
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70" htmlFor="filter-grupo">Grupo</label>
+                        <SearchableSelect 
+                          value={filterGrupo} 
+                          onValueChange={setFilterGrupo}
+                          placeholder="Selecione o grupo..."
+                          searchPlaceholder="Buscar grupo..."
+                          items={[
+                            { value: "todos", label: "Todos os Grupos" },
+                            ...grupos.map((g: any) => ({ value: g.nome, label: g.nome }))
+                          ]}
+                        />
                       </div>
                     )}
 
                     {selectedReport.filtros.includes("categoria") && (
                       <div className="space-y-2">
                         <label className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70" htmlFor="filter-cat">Categoria</label>
-                        <Select value={filterCategoria} onValueChange={setFilterCategoria}>
-                          <SelectTrigger id="filter-cat" className="w-full">
-                            <SelectValue placeholder="Selecione" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="todas">Todas as Categorias</SelectItem>
-                            <SelectItem value="informatica">Informatica</SelectItem>
-                            <SelectItem value="movel">Movel</SelectItem>
-                            <SelectItem value="equipamento">Equipamento</SelectItem>
-                            <SelectItem value="eletronico">Eletronico</SelectItem>
-                            <SelectItem value="veiculo">Veiculo</SelectItem>
-                          </SelectContent>
-                        </Select>
+                        <SearchableSelect 
+                          value={filterCategoria} 
+                          onValueChange={setFilterCategoria}
+                          placeholder="Selecione a categoria..."
+                          searchPlaceholder="Buscar categoria..."
+                          items={[
+                            { value: "todas", label: "Todas as Categorias" },
+                            { value: "informatica", label: "Informatica" },
+                            { value: "movel", label: "Movel" },
+                            { value: "equipamento", label: "Equipamento" },
+                            { value: "eletronico", label: "Eletronico" },
+                            { value: "veiculo", label: "Veiculo" },
+                          ]}
+                        />
                       </div>
                     )}
 
                     {selectedReport.filtros.includes("status") && (
                       <div className="space-y-2">
                         <label className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70" htmlFor="filter-status">Status</label>
-                        <Select value={filterStatus} onValueChange={setFilterStatus}>
-                          <SelectTrigger id="filter-status" className="w-full">
-                            <SelectValue placeholder="Selecione" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="todos">Todos os Status</SelectItem>
-                            <SelectItem value="ativo">Ativo</SelectItem>
-                            <SelectItem value="em_manutencao">Em Manutencao</SelectItem>
-                            <SelectItem value="baixado">Baixado</SelectItem>
-                          </SelectContent>
-                        </Select>
+                        <SearchableSelect 
+                          value={filterStatus} 
+                          onValueChange={setFilterStatus}
+                          placeholder="Selecione o status..."
+                          searchPlaceholder="Buscar status..."
+                          items={[
+                            { value: "todos", label: "Todos os Status" },
+                            { value: "ativo", label: "Ativo" },
+                            { value: "em_manutencao", label: "Em Manutencao" },
+                            { value: "baixado", label: "Baixado" },
+                          ]}
+                        />
                       </div>
                     )}
 
                     {selectedReport.filtros.includes("bem") && (
                       <div className="space-y-2">
                         <label className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70" htmlFor="filter-bem">Selecione o Bem</label>
-                        <Select value={filterBem} onValueChange={setFilterBem}>
-                          <SelectTrigger id="filter-bem" className="w-full">
-                            <SelectValue placeholder="Selecione um bem" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {allAssets.map((a) => (
-                              <SelectItem key={a.id} value={a.id}>
-                                {a.patrimonio} - {a.descricao}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        <SearchableSelect 
+                          value={filterBem} 
+                          onValueChange={setFilterBem}
+                          placeholder="Selecione um bem..."
+                          searchPlaceholder="Buscar por número do patrimônio ou nome..."
+                          items={allAssets.map((a) => ({
+                            value: String(a.id),
+                            label: `${a.patrimonio || a.patrimonioProvisorio || "Sem Número"} - ${a.descricao}`,
+                            searchTerms: `${a.patrimonio || ""} ${a.patrimonioProvisorio || ""} ${a.descricao}`
+                          }))}
+                        />
+                      </div>
+                    )}
+
+                    {selectedReport.filtros.includes("emenda") && (
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70" htmlFor="filter-emenda">
+                          Emenda Parlamentar
+                        </label>
+                        <input
+                          id="filter-emenda"
+                          value={filterEmenda}
+                          onChange={(e) => setFilterEmenda(e.target.value)}
+                          placeholder="Digite parte do nome, processo ou numero da emenda..."
+                          className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                        />
                       </div>
                     )}
                   </div>
@@ -452,11 +634,14 @@ export function Relatorios() {
                     <span className="text-muted-foreground">Assinatura</span>
                     <span className="font-medium">{pdfSettings.mostrarAssinatura ? "Sim" : "Nao"}</span>
                   </div>
-                </div>
               </div>
 
-              {/* Actions */}
-              <div className="flex justify-end gap-3 pt-2">
+              </div>
+            </div>
+            )}
+          </div>
+          
+          <div className="p-4 border-t bg-background mt-auto flex justify-end gap-3 z-10">
                 <Button
                   variant="outline"
                   onClick={() => setDialogOpen(false)}
@@ -467,9 +652,7 @@ export function Relatorios() {
                   <Download className="h-4 w-4" />
                   Gerar Relatorio
                 </Button>
-              </div>
-            </div>
-          )}
+          </div>
         </DialogContent>
       </Dialog>
     </div>

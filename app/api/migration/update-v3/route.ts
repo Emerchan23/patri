@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { execute } from '@/lib/db';
+import { withRole } from '@/lib/api-auth';
 
-export async function GET() {
+export const GET = withRole(["administrador"], async () => {
   try {
     // 1. Add new columns to fornecedores
     // We use a helper function to add column if not exists because MySQL doesn't support IF NOT EXISTS in ADD COLUMN directly in all versions easily in one line without procedure
@@ -23,6 +24,8 @@ export async function GET() {
     await addColumn('fornecedores', 'estado', 'VARCHAR(2) DEFAULT NULL');
     await addColumn('fornecedores', 'cidade', 'VARCHAR(100) DEFAULT NULL');
     await addColumn('fornecedores', 'nome_fantasia', 'VARCHAR(255) DEFAULT NULL');
+    await addColumn('fornecedores', 'telefone', 'VARCHAR(50) DEFAULT NULL');
+    await addColumn('fornecedores', 'endereco', 'TEXT DEFAULT NULL');
     // Rename 'nome' to match user expectation if needed, but we keep 'nome' as a required field, maybe for display or as alias to nome_fantasia
 
     // 2. Add Unique Indexes
@@ -48,6 +51,6 @@ export async function GET() {
 
     return NextResponse.json({ success: true, message: "Migration v3 applied" });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: "Erro ao aplicar migration v3" }, { status: 500 });
   }
-}
+})

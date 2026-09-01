@@ -40,6 +40,7 @@ export default function NovaAlienacaoPage() {
   const { toast } = useToast()
   const [step, setStep] = useState(1)
   const [loading, setLoading] = useState(false)
+  const [fieldErrors, setFieldErrors] = useState<string[]>([])
   
   // Estado do Formulario
   const [formData, setFormData] = useState<AlienacaoForm>({
@@ -79,15 +80,28 @@ export default function NovaAlienacaoPage() {
   }
 
   const handleNext = () => {
+    const newFieldErrors: string[] = []
+
     if (step === 1) {
-      if (!formData.numero_processo || !formData.data_abertura) {
+      if (!formData.numero_processo) newFieldErrors.push("numero_processo")
+      if (!formData.data_abertura) newFieldErrors.push("data_abertura")
+      
+      if (newFieldErrors.length > 0) {
+        setFieldErrors(newFieldErrors)
         toast({ title: "Preencha os campos obrigatórios", variant: "destructive" })
         return
       }
     }
     if (step === 2) {
+      // Validate each member
+      formData.comissao.forEach((m, i) => {
+          if (!m.nome) newFieldErrors.push(`comissao-${i}-nome`)
+          if (!m.cargo) newFieldErrors.push(`comissao-${i}-cargo`)
+      })
+
       const membrosValidos = formData.comissao.filter(m => m.nome && m.cargo)
       if (membrosValidos.length < 3) {
+        setFieldErrors(newFieldErrors)
         toast({ title: "A comissão deve ter no mínimo 3 membros identificados", variant: "destructive" })
         return
       }
@@ -98,6 +112,7 @@ export default function NovaAlienacaoPage() {
         return
       }
     }
+    setFieldErrors([])
     setStep(step + 1)
   }
 
@@ -155,22 +170,30 @@ export default function NovaAlienacaoPage() {
           </Select>
         </div>
         <div className="space-y-2">
-          <Label>Data de Abertura</Label>
+          <Label required className={fieldErrors.includes("data_abertura") ? "text-destructive" : ""}>Data de Abertura</Label>
           <Input 
             type="date" 
             value={formData.data_abertura}
-            onChange={(e) => setFormData({...formData, data_abertura: e.target.value})}
+            onChange={(e) => {
+                setFormData({...formData, data_abertura: e.target.value})
+                if (fieldErrors.includes("data_abertura")) setFieldErrors(prev => prev.filter(e => e !== "data_abertura"))
+            }}
+            className={fieldErrors.includes("data_abertura") ? "border-destructive focus-visible:ring-destructive" : ""}
           />
         </div>
       </div>
       
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-2">
-          <Label>Número do Processo Administrativo</Label>
+          <Label required className={fieldErrors.includes("numero_processo") ? "text-destructive" : ""}>Número do Processo Administrativo</Label>
           <Input 
             placeholder="Ex: 2024/00123"
             value={formData.numero_processo}
-            onChange={(e) => setFormData({...formData, numero_processo: e.target.value})}
+            onChange={(e) => {
+                setFormData({...formData, numero_processo: e.target.value})
+                if (fieldErrors.includes("numero_processo")) setFieldErrors(prev => prev.filter(e => e !== "numero_processo"))
+            }}
+            className={fieldErrors.includes("numero_processo") ? "border-destructive focus-visible:ring-destructive" : ""}
           />
         </div>
         <div className="space-y-2">
@@ -236,25 +259,29 @@ export default function NovaAlienacaoPage() {
 
           <div className="grid grid-cols-3 gap-4">
             <div className="space-y-2">
-              <Label>Nome Completo <span className="text-red-500">*</span></Label>
+              <Label className={fieldErrors.includes(`comissao-${index}-nome`) ? "text-destructive" : ""}>Nome Completo <span className="text-red-500">*</span></Label>
               <Input 
                 value={membro.nome}
                 onChange={(e) => {
                   const newComissao = [...formData.comissao]
                   newComissao[index].nome = e.target.value
                   setFormData({...formData, comissao: newComissao})
+                  if (fieldErrors.includes(`comissao-${index}-nome`)) setFieldErrors(prev => prev.filter(e => e !== `comissao-${index}-nome`))
                 }}
+                className={fieldErrors.includes(`comissao-${index}-nome`) ? "border-destructive focus-visible:ring-destructive" : ""}
               />
             </div>
             <div className="space-y-2">
-              <Label>Cargo <span className="text-red-500">*</span></Label>
+              <Label className={fieldErrors.includes(`comissao-${index}-cargo`) ? "text-destructive" : ""}>Cargo <span className="text-red-500">*</span></Label>
               <Input 
                 value={membro.cargo}
                 onChange={(e) => {
                   const newComissao = [...formData.comissao]
                   newComissao[index].cargo = e.target.value
                   setFormData({...formData, comissao: newComissao})
+                  if (fieldErrors.includes(`comissao-${index}-cargo`)) setFieldErrors(prev => prev.filter(e => e !== `comissao-${index}-cargo`))
                 }}
+                className={fieldErrors.includes(`comissao-${index}-cargo`) ? "border-destructive focus-visible:ring-destructive" : ""}
               />
             </div>
             <div className="space-y-2">

@@ -2,6 +2,11 @@
 
 export type UserRole = "administrador" | "gestor" | "assistente"
 
+export interface UserPermissionOverrides {
+  cadastrarBem?: boolean | null
+  cadastroProvisorioUnidade?: boolean | null
+}
+
 export interface User {
   id: string
   nome: string
@@ -15,10 +20,14 @@ export interface User {
   // Assistente is linked to a specific unit
   unidade?: {
     secretaria: string
-    departamento: string
+    departamento?: string
+    departamentos?: string[]
   }
   // Gestor can manage multiple secretarias
   secretariasGerenciadas?: string[]
+  departamentosAssistente?: string[]
+  permissionOverrides?: UserPermissionOverrides
+  permissions?: Permissions
   criadoEm: string
   ultimoAcesso?: string
 }
@@ -48,6 +57,7 @@ export const roleColors: Record<UserRole, string> = {
 
 // Permissions matrix
 export interface Permissions {
+  acessarMovimentacoes: boolean
   verDashboardGeral: boolean
   verDashboardUnidade: boolean
   cadastrarBem: boolean
@@ -58,6 +68,7 @@ export interface Permissions {
   verBensUnidade: boolean
   registrarMovimentacao: boolean
   aprovarMovimentacao: boolean
+  acessarCadastrosProvisorios: boolean
   gerenciarVeiculos: boolean
   verVeiculos: boolean
   usarScanner: boolean
@@ -73,6 +84,7 @@ export interface Permissions {
 
 export const rolePermissions: Record<UserRole, Permissions> = {
   administrador: {
+    acessarMovimentacoes: true,
     verDashboardGeral: true,
     verDashboardUnidade: true,
     cadastrarBem: true,
@@ -83,6 +95,7 @@ export const rolePermissions: Record<UserRole, Permissions> = {
     verBensUnidade: true,
     registrarMovimentacao: true,
     aprovarMovimentacao: true,
+    acessarCadastrosProvisorios: true,
     gerenciarVeiculos: true,
     verVeiculos: true,
     usarScanner: true,
@@ -96,6 +109,7 @@ export const rolePermissions: Record<UserRole, Permissions> = {
     gerenciarAlienacoes: true,
   },
   gestor: {
+    acessarMovimentacoes: true,
     verDashboardGeral: true,
     verDashboardUnidade: true,
     cadastrarBem: true,
@@ -106,6 +120,7 @@ export const rolePermissions: Record<UserRole, Permissions> = {
     verBensUnidade: true,
     registrarMovimentacao: true,
     aprovarMovimentacao: true,
+    acessarCadastrosProvisorios: true,
     gerenciarVeiculos: true,
     verVeiculos: true,
     usarScanner: true,
@@ -119,9 +134,10 @@ export const rolePermissions: Record<UserRole, Permissions> = {
     gerenciarAlienacoes: true,
   },
   assistente: {
+    acessarMovimentacoes: true,
     verDashboardGeral: false,
     verDashboardUnidade: true,
-    cadastrarBem: true,
+    cadastrarBem: false,
     editarBem: false,
     baixarBem: false,
     atribuirPatrimonioDefinitivo: false,
@@ -129,6 +145,7 @@ export const rolePermissions: Record<UserRole, Permissions> = {
     verBensUnidade: true,
     registrarMovimentacao: false,
     aprovarMovimentacao: false,
+    acessarCadastrosProvisorios: false,
     gerenciarVeiculos: false,
     verVeiculos: true,
     usarScanner: true,
@@ -141,6 +158,41 @@ export const rolePermissions: Record<UserRole, Permissions> = {
     excluirBem: false,
     gerenciarAlienacoes: false,
   },
+}
+
+export function resolveUserPermissionOverrides(
+  input?: {
+    role?: UserRole | string | null
+    podeCadastrarBem?: unknown
+    podeCadastroProvisorioUnidade?: unknown
+    permissionOverrides?: UserPermissionOverrides | null
+  } | null
+): UserPermissionOverrides {
+  const role = input?.role
+  const explicitOverride = input?.permissionOverrides?.cadastrarBem
+  const explicitCadastroProvisorio = input?.permissionOverrides?.cadastroProvisorioUnidade
+  const dbOverride = input?.podeCadastrarBem
+  const dbCadastroProvisorio = input?.podeCadastroProvisorioUnidade
+
+  if (role !== "assistente") {
+    return {}
+  }
+
+  const overrides: UserPermissionOverrides = {}
+
+  if (typeof explicitOverride === "boolean") {
+    overrides.cadastrarBem = explicitOverride
+  } else if (dbOverride !== null && dbOverride !== undefined) {
+    overrides.cadastrarBem = Boolean(dbOverride)
+  }
+
+  if (typeof explicitCadastroProvisorio === "boolean") {
+    overrides.cadastroProvisorioUnidade = explicitCadastroProvisorio
+  } else if (dbCadastroProvisorio !== null && dbCadastroProvisorio !== undefined) {
+    overrides.cadastroProvisorioUnidade = Boolean(dbCadastroProvisorio)
+  }
+
+  return overrides
 }
 
 // Mock users
@@ -243,10 +295,20 @@ export const mockUsers: User[] = [
   },
 ]
 
-export function getPermissions(role: UserRole): Permissions {
-  return rolePermissions[role]
+export function getPermissions(role: UserRole, overrides?: UserPermissionOverrides | null): Permissions {
+  const basePermissions = rolePermissions[role]
+
+  if (role === "administrador" || !overrides || overrides.cadastrarBem === null || overrides.cadastrarBem === undefined) {
+    return { ...basePermissions }
+  }
+
+  return {
+    ...basePermissions,
+    cadastrarBem: Boolean(overrides.cadastrarBem),
+    acessarCadastrosProvisorios: Boolean(overrides.cadastroProvisorioUnidade),
+  }
 }
 
-export function hasPermission(role: UserRole, permission: keyof Permissions): boolean {
-  return rolePermissions[role][permission]
+export function hasPermission(role: UserRole, permission: keyof Permissions, overrides?: UserPermissionOverrides | null): boolean {
+  return getPermissions(role, overrides)[permission]
 }

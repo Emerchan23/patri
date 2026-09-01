@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server"
 import { execute } from "@/lib/db"
+import { withRole } from "@/lib/api-auth"
 
 export const dynamic = 'force-dynamic'
 
-export async function GET() {
+export const GET = withRole(["administrador"], async () => {
   try {
     // Create table fornecedores
     await execute(`
@@ -24,6 +25,6 @@ export async function GET() {
 
     return NextResponse.json({ success: true, message: "Tabela fornecedores criada com sucesso" })
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ error: "Erro ao aplicar migracao" }, { status: 500 })
   }
-}
+})

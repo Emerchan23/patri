@@ -59,6 +59,16 @@ import {
   type AuditLog,
   type LogAction,
 } from "@/lib/data"
+import { DatePicker } from "@/components/ui/date-picker"
+import {
+  Pagination,
+  PaginationContent,
+  PaginationEllipsis,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination"
 import { api, fetcher } from "@/lib/api-client"
 
 const actionIcons: Record<LogAction, React.ComponentType<{ className?: string }>> = {
@@ -93,44 +103,64 @@ function groupLogsByDate(logs: AuditLog[]): Record<string, AuditLog[]> {
 }
 
 export function AuditLogs() {
-  const { data: logs = [] } = useSWR<AuditLog[]>("/logs?limit=500", fetcher)
-
   const [search, setSearch] = useState("")
   const [actionFilter, setActionFilter] = useState<string>("todas")
   const [userFilter, setUserFilter] = useState<string>("todos")
   const [entityFilter, setEntityFilter] = useState<string>("todos")
-  const [selectedLog, setSelectedLog] = useState<AuditLog | null>(null)
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+  const [dataInicio, setDataInicio] = useState<Date | undefined>(undefined)
+  const [dataFim, setDataFim] = useState<Date | undefined>(undefined)
+  const [page, setPage] = useState(1)
+  const [limit] = useState(300)
 
+  const queryParams = new URLSearchParams()
+  queryParams.set("page", page.toString())
+  queryParams.set("limit", limit.toString())
+  if (actionFilter !== "todas") queryParams.set("acao", actionFilter)
+  if (userFilter !== "todos") queryParams.set("usuario", userFilter) // This works differently now, it filters by name in backend, or we filter in frontend. Let's rely on backend where possible.
+  // Actually the original implementation fetched all and filtered in frontend.
+  // With pagination, we should fetch from backend with filters.
+  
+  // To keep it simple and preserve existing user list, let's fetch a list of users for the filter, 
+  // and fetch logs based on the selected filters.
+  
+  if (dataInicio) queryParams.set("dataInicio", dataInicio.toISOString().split('T')[0])
+  if (dataFim) queryParams.set("dataFim", dataFim.toISOString().split('T')[0])
+  if (search) queryParams.set("busca", search)
+
+  const { data: logsData } = useSWR(`/logs?${queryParams.toString()}`, fetcher)
+  
+  const logs = logsData?.data || []
+  const meta = logsData?.meta || { total: 0, page: 1, limit: 300, totalPages: 1 }
+
+  // Fetch all logs once just to extract unique users? No, better to fetch users from /api/usuarios
+  const { data: usersData } = useSWR("/usuarios", fetcher)
   const uniqueUsers = useMemo(() => {
     const users = new Map<string, string>()
-    for (const log of logs) {
-      if (log.usuario) {
-        users.set(log.usuario.id, log.usuario.nome)
+    if (usersData && Array.isArray(usersData)) {
+      for (const u of usersData) {
+        users.set(String(u.id), u.nome)
       }
     }
     return Array.from(users.entries())
-  }, [logs])
+  }, [usersData])
 
+  const [selectedLog, setSelectedLog] = useState<AuditLog | null>(null)
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+
+  // We filter entity in frontend since backend doesn't have entity filter parameter implemented directly.
   const filtered = useMemo(() => {
-    return logs.filter((log) => {
-      const matchSearch =
-        search === "" ||
-        log.descricao.toLowerCase().includes(search.toLowerCase()) ||
-        (log.usuario && log.usuario.nome.toLowerCase().includes(search.toLowerCase())) ||
-        (log.detalhes && log.detalhes.toLowerCase().includes(search.toLowerCase())) ||
-        (log.entidade && log.entidade.descricao.toLowerCase().includes(search.toLowerCase()))
-
-      const matchAction = actionFilter === "todas" || log.acao === actionFilter
-      const matchUser = userFilter === "todos" || (log.usuario && log.usuario.id === userFilter)
+    return logs.filter((log: AuditLog) => {
       const matchEntity =
         entityFilter === "todos" ||
         (entityFilter === "sem_entidade" && !log.entidade) ||
         (log.entidade && log.entidade.tipo === entityFilter)
 
-      return matchSearch && matchAction && matchUser && matchEntity
+      // Apply user filter here if backend doesn't support by ID
+      const matchUser = userFilter === "todos" || (log.usuario && log.usuario.id === userFilter)
+
+      return matchEntity && matchUser
     })
-  }, [search, actionFilter, userFilter, entityFilter, logs])
+  }, [entityFilter, userFilter, logs])
 
   const grouped = useMemo(() => groupLogsByDate(filtered), [filtered])
   const dateKeys = Object.keys(grouped).sort((a, b) => b.localeCompare(a))
@@ -138,17 +168,17 @@ export function AuditLogs() {
   // Stats
   const stats = useMemo(() => {
     const today = new Date().toISOString().split("T")[0]
-    const todayLogs = logs.filter((l) => l.dataHora && l.dataHora.startsWith(today))
-    const criticos = logs.filter((l) =>
+    const todayLogs = logs.filter((l: AuditLog) => l.dataHora && l.dataHora.startsWith(today))
+    const criticos = logs.filter((l: AuditLog) =>
       ["exclusao", "baixa", "usuario_desativado"].includes(l.acao)
     )
     return {
-      total: logs.length,
+      total: meta.total || logs.length,
       hoje: todayLogs.length,
       criticos: criticos.length,
-      usuarios: new Set(logs.map((l) => l.usuario?.id).filter(Boolean)).size,
+      usuarios: new Set(logs.map((l: AuditLog) => l.usuario?.id).filter(Boolean)).size,
     }
-  }, [logs])
+  }, [logs, meta.total])
 
   const toggleGroup = (dateKey: string) => {
     setExpandedGroups((prev) => {
@@ -232,7 +262,22 @@ export function AuditLogs() {
                 onChange={(e) => setSearch(e.target.value)}
               />
             </div>
-            <div className="flex flex-wrap gap-3">
+            
+            <div className="flex flex-wrap gap-3 items-center">
+              <div className="flex items-center gap-2">
+                <DatePicker
+                  date={dataInicio}
+                  setDate={setDataInicio}
+                  placeholder="Data Início"
+                />
+                <span className="text-muted-foreground text-sm">até</span>
+                <DatePicker
+                  date={dataFim}
+                  setDate={setDataFim}
+                  placeholder="Data Fim"
+                />
+              </div>
+
               <Select value={actionFilter} onValueChange={setActionFilter}>
                 <SelectTrigger className="w-44">
                   <Filter className="h-4 w-4 mr-2 text-muted-foreground" />
@@ -294,12 +339,37 @@ export function AuditLogs() {
         </CardContent>
       </Card>
 
-      {/* Results count */}
-      <div className="flex items-center justify-between">
+      {/* Results count & Pagination */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <p className="text-sm text-muted-foreground">
-          {filtered.length} registro{filtered.length !== 1 ? "s" : ""} encontrado
-          {filtered.length !== 1 ? "s" : ""}
+          {meta.total} registro{meta.total !== 1 ? "s" : ""} encontrado{meta.total !== 1 ? "s" : ""}
         </p>
+
+        {meta.totalPages > 1 && (
+          <Pagination className="justify-end">
+            <PaginationContent>
+              <PaginationItem>
+                <PaginationPrevious 
+                  onClick={() => setPage(p => Math.max(1, p - 1))}
+                  className={page === 1 ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                />
+              </PaginationItem>
+              
+              <PaginationItem>
+                <span className="text-sm text-muted-foreground px-4">
+                  Página {page} de {meta.totalPages}
+                </span>
+              </PaginationItem>
+
+              <PaginationItem>
+                <PaginationNext 
+                  onClick={() => setPage(p => Math.min(meta.totalPages, p + 1))}
+                  className={page === meta.totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                />
+              </PaginationItem>
+            </PaginationContent>
+          </Pagination>
+        )}
       </div>
 
       {/* Timeline grouped by date */}

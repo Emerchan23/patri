@@ -4,6 +4,7 @@ let pool: mysql.Pool | null = null
 
 export function getPool(): mysql.Pool {
   if (!pool) {
+    // Create pool with better timeouts and keep-alive settings
     pool = mysql.createPool({
       host: process.env.DB_HOST || "localhost",
       port: Number(process.env.DB_PORT || 3306),
@@ -14,6 +15,10 @@ export function getPool(): mysql.Pool {
       connectionLimit: 10,
       queueLimit: 0,
       charset: "utf8mb4",
+      enableKeepAlive: true,
+      keepAliveInitialDelay: 0,
+      // Add timeouts to fail fast if DB is unreachable (avoid 40s wait)
+      connectTimeout: 10000, // 10s
     })
   }
   return pool
@@ -34,4 +39,19 @@ export async function execute(sql: string, params?: unknown[]): Promise<mysql.Re
   const db = getPool()
   const [result] = await db.execute(sql, params)
   return result as mysql.ResultSetHeader
+}
+
+export async function withTransaction<T>(callback: (connection: mysql.PoolConnection) => Promise<T>): Promise<T> {
+  const connection = await getPool().getConnection()
+  try {
+    await connection.beginTransaction()
+    const result = await callback(connection)
+    await connection.commit()
+    return result
+  } catch (error) {
+    await connection.rollback()
+    throw error
+  } finally {
+    connection.release()
+  }
 }

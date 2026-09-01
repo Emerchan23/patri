@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { execute, queryOne } from "@/lib/db"
 import { verifyAuth } from "@/lib/api-auth"
 import { registrarLog } from "@/lib/audit"
+import { assertAssetAccess } from "@/lib/asset-scope"
 
 export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const user = await verifyAuth(req)
@@ -17,6 +18,11 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   const existing = await queryOne<any>("SELECT * FROM bens WHERE id = ?", [id])
   if (!existing) {
     return NextResponse.json({ error: "Veiculo nao encontrado" }, { status: 404 })
+  }
+  try {
+    await assertAssetAccess(user, id)
+  } catch {
+    return NextResponse.json({ error: "Sem permissao para acessar este veiculo" }, { status: 403 })
   }
 
   await execute(
@@ -84,6 +90,11 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
 
   const veiculo = await queryOne<any>("SELECT * FROM bens WHERE id = ?", [id])
   if (!veiculo) return NextResponse.json({ error: "Veiculo nao encontrado" }, { status: 404 })
+  try {
+    await assertAssetAccess(user, id)
+  } catch {
+    return NextResponse.json({ error: "Sem permissao para acessar este veiculo" }, { status: 403 })
+  }
 
   await execute("DELETE FROM bens WHERE id = ?", [id])
   

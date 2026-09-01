@@ -42,15 +42,11 @@ interface Marca {
   nome: string
 }
 
-export function MarcaSelector({
-  value,
-  onValueChange,
-  className,
-  placeholder = "Selecione uma marca",
-}: MarcaSelectorProps) {
+export function MarcaSelector({ value, onValueChange, placeholder = "Selecione", className }: MarcaSelectorProps) {
   const [open, setOpen] = React.useState(false)
   const [manageOpen, setManageOpen] = React.useState(false)
-  const { data: marcas = [] } = useSWR<Marca[]>("/marcas", fetcher)
+  const { data: result } = useSWR("/marcas?all=true", fetcher)
+  const marcas = Array.isArray(result) ? result : (result?.data || [])
   const { toast } = useToast()
 
   const [newItem, setNewItem] = React.useState("")
@@ -73,13 +69,12 @@ export function MarcaSelector({
       } else {
         toast({ title: "Sucesso", description: "Marca criada com sucesso!" })
         setNewItem("")
-        mutate("/marcas")
-        // Optionally select the new item
-        // onValueChange(newItem)
+        mutate("/marcas?all=true")
       }
     } catch (error: any) {
       console.error(error)
-      toast({ title: "Erro", description: error.message || "Erro ao criar marca.", variant: "destructive" })
+      const msg = error.response?.data?.error || error.message || "Erro ao criar marca."
+      toast({ title: "Erro", description: msg, variant: "destructive" })
     } finally {
       setIsCreating(false)
     }
@@ -95,10 +90,11 @@ export function MarcaSelector({
       } else {
         toast({ title: "Sucesso", description: "Marca removida com sucesso!" })
         if (value === nome) onValueChange("")
-        mutate("/marcas")
+        mutate("/marcas?all=true")
       }
-    } catch (error) {
-      toast({ title: "Erro", description: "Erro ao remover marca", variant: "destructive" })
+    } catch (error: any) {
+      const msg = error.response?.data?.error || error.message || "Erro ao remover marca"
+      toast({ title: "Erro", description: msg, variant: "destructive" })
     }
   }
 
@@ -110,7 +106,7 @@ export function MarcaSelector({
             variant="outline"
             role="combobox"
             aria-expanded={open}
-            className={cn("w-full justify-between font-normal", !value && "text-muted-foreground")}
+            className={cn("w-full justify-between", className)}
           >
             {value || placeholder}
             <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
@@ -122,7 +118,7 @@ export function MarcaSelector({
             <CommandList>
               <CommandEmpty>Nenhuma marca encontrada.</CommandEmpty>
               <CommandGroup>
-                {marcas.map((item) => (
+                {marcas.map((item: any) => (
                   <CommandItem
                     key={item.id}
                     value={item.nome}
@@ -173,7 +169,7 @@ export function MarcaSelector({
               </div>
             ) : (
               <ul className="divide-y">
-                {marcas.map((item) => (
+                {marcas.map((item: any) => (
                   <li key={item.id} className="flex items-center justify-between p-2 hover:bg-muted/50">
                     <span className="text-sm">{item.nome}</span>
                     <Button 

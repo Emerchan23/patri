@@ -21,19 +21,13 @@ export const GET = withAuth(async (request) => {
   const usedNumbers = new Set<number>()
   
   for (const row of rows) {
-    // Try to extract number from the end of the string
-    // e.g. "PAT-00123" -> 123
-    // "123" -> 123
-    // "ABC" -> null
-    
-    // If prefix is provided, remove it first
     let clean = row.patrimonio
     if (prefix && clean.startsWith(prefix)) {
         clean = clean.substring(prefix.length)
     }
-    
-    // Extract first sequence of digits
-    const match = clean.match(/(\d+)/)
+
+    // Extract the LAST sequence of digits to support patterns like PAT-2026-00001
+    const match = clean.match(/(\d+)(?!.*\d)/)
     if (match) {
         const num = parseInt(match[1], 10)
         if (!isNaN(num) && num > 0 && num < 1000000) { // Safety limit

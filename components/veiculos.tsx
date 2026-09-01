@@ -307,6 +307,22 @@ export function Veiculos() {
                   <Badge className={`text-xs ${getStatusColor(selectedVehicle.status)}`}>{getStatusLabel(selectedVehicle.status)}</Badge>
                 </div>
               </DialogHeader>
+              
+              <div className="mb-4 mt-4 rounded-lg border bg-muted/30 p-2 flex justify-center">
+                {selectedVehicle.imagem ? (
+                  <img 
+                    src={selectedVehicle.imagem} 
+                    alt={selectedVehicle.descricao}
+                    className="max-h-[250px] w-auto rounded-md object-contain shadow-sm"
+                  />
+                ) : (
+                  <div className="flex flex-col items-center justify-center py-8 text-muted-foreground/50">
+                    <ImageIcon className="h-12 w-12 mb-2" />
+                    <p className="text-sm">Sem imagem cadastrada</p>
+                  </div>
+                )}
+              </div>
+
               <div className="grid grid-cols-2 gap-4 mt-4">
                 <div className="flex flex-col gap-1 rounded-lg bg-muted p-3"><span className="text-[10px] text-muted-foreground uppercase tracking-wider">Placa</span><span className="text-lg font-bold">{selectedVehicle.placa}</span></div>
                 <div className="flex flex-col gap-1 rounded-lg bg-muted p-3"><span className="text-[10px] text-muted-foreground uppercase tracking-wider">KM Atual</span><span className="text-lg font-bold">{(selectedVehicle.kmAtual || 0).toLocaleString("pt-BR")}</span></div>
@@ -328,18 +344,22 @@ export function Veiculos() {
       <Dialog open={showEditDialog} onOpenChange={(open) => {
         if (!open) { setShowEditDialog(false); setSelectedVehicle(null); }
       }}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Editar Veículo</DialogTitle>
-            <DialogDescription>
-              Faça as alterações necessárias nos dados do veículo.
-            </DialogDescription>
-          </DialogHeader>
-          {selectedVehicle && (
-            <div className="flex flex-col gap-6 mt-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="flex flex-col gap-4">
-                   <div className="flex flex-col gap-2">
+        <DialogContent className="max-w-2xl h-[90vh] flex flex-col p-0 gap-0">
+          <div className="p-6 pb-4 border-b">
+            <DialogHeader>
+              <DialogTitle>Editar Veículo</DialogTitle>
+              <DialogDescription>
+                Faça as alterações necessárias nos dados do veículo.
+              </DialogDescription>
+            </DialogHeader>
+          </div>
+          
+          <div className="flex-1 overflow-y-auto px-6 py-6">
+            {selectedVehicle && (
+              <div className="flex flex-col gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="flex flex-col gap-4">
+                     <div className="flex flex-col gap-2">
                      <Label htmlFor="edit-patrimonio" required>Patrimônio</Label>
                      <Input 
                        id="edit-patrimonio" 
@@ -477,18 +497,19 @@ export function Veiculos() {
                   </div>
                 </div>
               </div>
-
-              <div className="flex justify-end gap-2 mt-4">
-                <Button variant="outline" onClick={() => { setShowEditDialog(false); setSelectedVehicle(null); }}>
-                  Cancelar
-                </Button>
-                <Button onClick={handleSaveEdit} disabled={saving} className="gap-2">
-                  {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-                  Salvar Alterações
-                </Button>
               </div>
-            </div>
-          )}
+            )}
+          </div>
+
+          <div className="p-4 border-t bg-background mt-auto flex justify-end gap-2 z-10">
+            <Button variant="outline" onClick={() => { setShowEditDialog(false); setSelectedVehicle(null); }}>
+              Cancelar
+            </Button>
+            <Button onClick={handleSaveEdit} disabled={saving} className="gap-2">
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              Salvar Alterações
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
 

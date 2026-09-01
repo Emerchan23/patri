@@ -1,9 +1,9 @@
 
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useParams } from "next/navigation"
-import { api } from "@/lib/api-client"
+import { api, getApiErrorMessage } from "@/lib/api-client"
 import { Loan, formatDate } from "@/lib/data"
 import { Button } from "@/components/ui/button"
 import { Printer, Loader2 } from "lucide-react"
@@ -18,12 +18,16 @@ export default function TermoEmprestimoPage() {
   const [loan, setLoan] = useState<Loan | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
+  const [pdfSettings, setPdfSettings] = useState<any>(null)
+  const [uploading, setUploading] = useState(false)
+  const [uploadMessage, setUploadMessage] = useState("")
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (isAuthenticated && id) {
       setLoading(true)
-      api.getEmprestimo(id)
-        .then((data) => setLoan(data))
+      Promise.all([api.getEmprestimo(id), api.getPdfSettings()])
+        .then(([loanData, settings]) => { setLoan(loanData); setPdfSettings(settings) })
         .catch((err) => setError(err.message))
         .finally(() => setLoading(false))
     }
@@ -39,13 +43,46 @@ export default function TermoEmprestimoPage() {
   if (error) return <div className="flex h-screen items-center justify-center text-destructive print:hidden">Erro: {error}</div>
   if (!loan) return <div className="flex h-screen items-center justify-center print:hidden">Emprestimo nao encontrado</div>
 
+  const uploadSignedTerm = async (file: File) => {
+    setUploading(true)
+    setUploadMessage("")
+    try {
+      await api.uploadTermoEmprestimo(id, file)
+      const refreshed = await api.getEmprestimo(id)
+      setLoan(refreshed)
+      setUploadMessage("Termo assinado anexado com sucesso.")
+    } catch (uploadError) {
+      setUploadMessage(getApiErrorMessage(uploadError, "Nao foi possivel anexar o termo assinado."))
+    } finally {
+      setUploading(false)
+      if (fileInputRef.current) fileInputRef.current.value = ""
+    }
+  }
+
+  const settings = pdfSettings || {
+    nomeOrgao: "SisPatrimonio",
+    subtitulo: "Controle Patrimonial",
+    endereco: "",
+    telefone: "",
+    cnpj: "",
+    logoUrl: null,
+  }
+
   return (
     <div className="min-h-screen bg-white p-8 print:p-0">
       <div className="mx-auto max-w-4xl space-y-8 print:space-y-6">
-        {/* Header */}
-        <div className="text-center border-b pb-6 print:pb-4">
-          <h1 className="text-2xl font-bold uppercase mb-2">Termo de Responsabilidade de Emprestimo</h1>
-          <p className="text-muted-foreground print:text-black">Controle Patrimonial - Emprestimo de Equipamentos</p>
+        {/* Institutional letterhead */}
+        <div className="flex items-center gap-4 border-b-2 border-primary pb-5 print:border-black print:pb-4">
+          {settings.mostrarLogo && settings.logoUrl && <img src={settings.logoUrl} alt="Logo institucional" className="h-16 w-24 object-contain" />}
+          <div className="flex-1 text-center">
+            <p className="text-lg font-bold uppercase">{settings.nomeOrgao}</p>
+            <p className="text-xs text-muted-foreground print:text-black">{settings.subtitulo}</p>
+            {settings.endereco && <p className="text-[10px] text-muted-foreground print:text-black">{settings.endereco}</p>}
+            {(settings.cnpj || settings.telefone) && <p className="text-[10px] text-muted-foreground print:text-black">{settings.cnpj}{settings.cnpj && settings.telefone ? " | " : ""}{settings.telefone}</p>}
+            <h1 className="mt-4 text-2xl font-bold uppercase">Termo de Responsabilidade de Emprestimo</h1>
+            <p className="text-muted-foreground print:text-black">Controle Patrimonial - Emprestimo de Equipamentos</p>
+          </div>
+          <div className="w-24" />
         </div>
 
         {/* Action Buttons (Hidden on Print) */}
@@ -54,6 +91,18 @@ export default function TermoEmprestimoPage() {
             <Printer className="mr-2 h-4 w-4" />
             Imprimir Termo
           </Button>
+          <input ref={fileInputRef} type="file" accept="application/pdf" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadSignedTerm(file) }} />
+          <Button variant="outline" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+            {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+            Anexar termo assinado
+          </Button>
+        </div>
+        {uploadMessage && <div className={`rounded border p-3 text-sm print:hidden ${uploadMessage.includes("sucesso") ? "border-green-200 bg-green-50 text-green-800" : "border-destructive/30 bg-destructive/5 text-destructive"}`}>{uploadMessage}</div>}
+
+        <div className="rounded border p-3 text-sm print:hidden">
+          <strong>Status do termo:</strong> {loan.termo?.status === "assinado" ? "Assinado e anexado" : "Aguardando assinatura"}
+          {loan.termo?.assinadoEm && <span className="ml-2 text-muted-foreground">em {new Date(loan.termo.assinadoEm).toLocaleDateString("pt-BR")}</span>}
+          {loan.termo?.arquivoAssinado && <a className="ml-3 text-primary underline" href={loan.termo.arquivoAssinado} target="_blank" rel="noreferrer">Abrir PDF assinado</a>}
         </div>
 
         {/* Content */}

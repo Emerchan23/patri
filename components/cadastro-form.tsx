@@ -30,14 +30,17 @@ import {
   X,
   ImageIcon,
   Camera,
+  Maximize2,
+  Minimize2,
 } from "lucide-react"
-import { api, fetcher } from "@/lib/api-client"
+import { api, fetcher, getApiErrorMessage, isApiError } from "@/lib/api-client"
 import useSWR, { mutate } from "swr"
 import type { AssetCategory } from "@/lib/data"
 import { Trash2 } from "lucide-react"
 import { EntradaNotaFiscal } from "./entrada-nota-fiscal"
 import { DatePicker } from "@/components/ui/date-picker"
 import { SearchableSelect } from "@/components/ui/searchable-select"
+import { AssetSearchSelector } from "./asset-search-selector"
 import { GroupSelector } from "@/components/group-selector"
 import { MarcaSelector } from "@/components/marca-selector"
 import { FornecedorSelector } from "@/components/fornecedor-selector"
@@ -62,8 +65,11 @@ interface LoteItem {
   modelo: string
   fornecedor: string
   valor: string
+  tempoGarantia?: string
   quantidade: number
   imagem?: string | null
+  patrimonioInicial?: string
+  emendaParlamentar?: string
 }
 
 interface Sala {
@@ -94,21 +100,71 @@ interface Marca {
   nome: string
 }
 
+type TipoEntradaBem =
+  | "compra"
+  | "aquisicao"
+  | "doacao"
+  | "transferencia"
+  | "comodato"
+  | "cessao"
+  | "permuta"
+  | "outro"
+
 import { ResponsavelSelect } from "@/components/responsavel-select"
 import { useAuth } from "@/lib/auth-context"
+
+const parsePatrimonioSequence = (value: string) => {
+  const match = value.trim().match(/^(.*?)(\d+)$/)
+  if (!match) return null
+  return {
+    prefix: match[1],
+    nextNumber: parseInt(match[2], 10),
+    padding: match[2].length,
+  }
+}
+
+const buildSequentialCodes = (initialCode: string, quantity: number) => {
+  const parsed = parsePatrimonioSequence(initialCode)
+  if (!parsed) return null
+
+  return Array.from({ length: quantity }, (_, index) => ({
+    code: `${parsed.prefix}${String(parsed.nextNumber + index).padStart(parsed.padding, "0")}`,
+    itemIndex: index,
+  }))
+}
+
+const formatLocalConflictMessage = (code: string, firstItemIndex: number, secondItemIndex: number) =>
+  `O patrimônio ${code} foi gerado mais de uma vez entre os itens ${firstItemIndex + 1} e ${secondItemIndex + 1}. Ajuste os números iniciais antes de cadastrar.`
+
+const tipoEntradaOptions: Array<{ value: TipoEntradaBem; label: string }> = [
+  { value: "compra", label: "Compra" },
+  { value: "aquisicao", label: "Aquisição" },
+  { value: "doacao", label: "Doação" },
+  { value: "transferencia", label: "Transferência" },
+  { value: "comodato", label: "Comodato" },
+  { value: "cessao", label: "Cessão" },
+  { value: "permuta", label: "Permuta" },
+  { value: "outro", label: "Outro" },
+]
 
 export function CadastroForm() {
   const { user } = useAuth()
   const { toast } = useToast()
-  const { data: categorias = [] } = useSWR<Categoria[]>("/categorias", fetcher)
-  const { data: marcas = [] } = useSWR<Marca[]>("/marcas", fetcher)
-  const { data: secretarias = [] } = useSWR<Secretaria[]>("/secretarias", fetcher)
+  
+  const { data: categoriasData } = useSWR("/categorias?all=true", fetcher)
+  const categorias = Array.isArray(categoriasData) ? categoriasData : (categoriasData?.data || [])
+
+  const { data: marcasData } = useSWR("/marcas?all=true", fetcher)
+  const marcas = Array.isArray(marcasData) ? marcasData : (marcasData?.data || [])
+
+  const { data: secretariasData } = useSWR("/secretarias?all=true", fetcher)
+  const secretarias = Array.isArray(secretariasData) ? secretariasData : (secretariasData?.data || [])
   
   // Pre-fill location for assistants
   useEffect(() => {
     if (user?.role === "assistente" && user.unidade) {
         setSecretariaSel(user.unidade.secretaria)
-        setDepartamentoSel(user.unidade.departamento)
+        setDepartamentoSel(user.unidade.departamentos?.[0] || user.unidade.departamento || "")
     }
   }, [user])
   
@@ -122,16 +178,9 @@ export function CadastroForm() {
   const [isManualProvisorio, setIsManualProvisorio] = useState(false)
   const [manualProvisorio, setManualProvisorio] = useState("")
 
-  // Fetch next available definitive number when type changes to definitive (Batch mode)
   useEffect(() => {
     if (patrimonioTipo === "definitivo" && modoEntrada === "lote") {
-      api.get('/bens/next-number').then((res) => {
-        if (res && res.nextNumber) {
-          const year = new Date().getFullYear();
-          const num = String(res.nextNumber).padStart(5, '0');
-          setLotePatrimonioInicial(`PAT-${year}-${num}`)
-        }
-      }).catch(err => console.error("Error fetching next number:", err))
+      setLotePatrimonioInicial("")
     }
   }, [patrimonioTipo, modoEntrada])
   const [isValidatingTag, setIsValidatingTag] = useState(false)
@@ -148,11 +197,18 @@ export function CadastroForm() {
   const [dataAquisicao, setDataAquisicao] = useState<Date | undefined>(new Date())
   const [valorIndividual, setValorIndividual] = useState("")
   const [tempoGarantia, setTempoGarantia] = useState("")
+  const [emendaParlamentar, setEmendaParlamentar] = useState("")
   const [saved, setSaved] = useState(false)
   const [savedMessage, setSavedMessage] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const individualSubmitLockRef = useRef(false)
+  const loteSubmitLockRef = useRef(false)
+  const [submitErrorSummary, setSubmitErrorSummary] = useState<string[]>([])
+  const [loteSubmitErrorSummary, setLoteSubmitErrorSummary] = useState<string[]>([])
   const [imagemPreview, setImagemPreview] = useState<string | null>(null)
+  const [notaFiscalPdf, setNotaFiscalPdf] = useState<string | null>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const pdfInputRef = useRef<HTMLInputElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   
   // Webcam state
@@ -174,14 +230,35 @@ export function CadastroForm() {
   const [descricao, setDescricao] = useState("")
   const [modelo, setModelo] = useState("")
   const [serie, setSerie] = useState("")
+  const [patrimonioManual, setPatrimonioManual] = useState("")
+  const [observacoes, setObservacoes] = useState("")
+  const [tipoEntrada, setTipoEntrada] = useState<TipoEntradaBem>("compra")
+  const [placa, setPlaca] = useState("")
+  const [anoVeiculo, setAnoVeiculo] = useState("")
+  const [kmAtualVeiculo, setKmAtualVeiculo] = useState("")
   
   // Lote manual state
   const [loteItems, setLoteItems] = useState<LoteItem[]>([
-    { id: "1", descricao: "", categoria: "", grupo: "", marca: "", modelo: "", fornecedor: "", valor: "", quantidade: 1, imagem: null },
+    { id: "1", descricao: "", categoria: "", grupo: "", marca: "", modelo: "", fornecedor: "", valor: "", tempoGarantia: "", quantidade: 1, imagem: null, patrimonioInicial: "", emendaParlamentar: "" },
   ])
   const [loteSaved, setLoteSaved] = useState(false)
   const [loteSavedMessage, setLoteSavedMessage] = useState("")
   const [lotePatrimonioInicial, setLotePatrimonioInicial] = useState("")
+  const [isTableMaximized, setIsTableMaximized] = useState(false)
+
+  const getDefinitivePrefix = (date?: Date | string | null) => {
+    if (!date) return `PAT-${new Date().getFullYear()}-`
+    const parsed = typeof date === "string" ? new Date(date) : date
+    const year = Number.isNaN(parsed.getTime()) ? new Date().getFullYear() : parsed.getFullYear()
+    return `PAT-${year}-`
+  }
+
+  const getAutomaticDefinitiveStart = async (prefix?: string) => {
+    const effectivePrefix = prefix || getDefinitivePrefix(new Date())
+    const res = await api.get(`/bens/next-number?prefix=${encodeURIComponent(effectivePrefix)}`)
+    const nextNumber = Number(res?.nextNumber || 1)
+    return `${effectivePrefix}${String(nextNumber).padStart(5, "0")}`
+  }
 
   // Responsavel state (shared)
   const [responsavelNome, setResponsavelNome] = useState("")
@@ -194,6 +271,7 @@ export function CadastroForm() {
 
   const handleCreateDept = async () => {
     if (!newDeptName.trim() || !selectedSecretaria) return
+
     try {
       const res = await api.createDepartamento(selectedSecretaria.id, { nome: newDeptName })
       if (res && res.error) {
@@ -202,7 +280,7 @@ export function CadastroForm() {
         toast({ title: "Sucesso", description: "Departamento criado!" })
         setNewDeptName("")
         setIsCreatingDept(false)
-        mutate("/secretarias")
+        mutate("/secretarias?all=true")
       }
     } catch (e) {
       toast({ title: "Erro", description: "Erro ao criar departamento", variant: "destructive" })
@@ -211,6 +289,8 @@ export function CadastroForm() {
 
   const handleCreateSala = async () => {
     if (!newSalaName.trim() || !selectedDepartamento) return
+    const generatedManualCodes = new Map<string, number>()
+
     try {
       const res = await api.createSala(selectedDepartamento.id, { nome: newSalaName })
       if (res && res.error) {
@@ -219,7 +299,7 @@ export function CadastroForm() {
         toast({ title: "Sucesso", description: "Sala criada!" })
         setNewSalaName("")
         setIsCreatingSala(false)
-        mutate("/secretarias")
+        mutate("/secretarias?all=true")
       }
     } catch (e) {
       toast({ title: "Erro", description: "Erro ao criar sala", variant: "destructive" })
@@ -238,7 +318,30 @@ export function CadastroForm() {
     e.target.value = ""
   }
 
-  const selectedSecretaria = secretarias.find((s) => s.nome === secretariaSel)
+  const handlePdfChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (file.type !== "application/pdf") {
+      toast({
+        title: "Arquivo inválido",
+        description: "Por favor, selecione um arquivo PDF.",
+        variant: "destructive",
+      })
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      setNotaFiscalPdf(ev.target?.result as string)
+      toast({
+          title: "Sucesso",
+          description: "PDF da Nota Fiscal anexado com sucesso!",
+      })
+    }
+    reader.readAsDataURL(file)
+    e.target.value = ""
+  }
+
+  const selectedSecretaria = (secretarias as Secretaria[]).find((s) => s.nome === secretariaSel)
   const selectedDepartamento = selectedSecretaria?.departamentos.find(
     (d) => d.nome === departamentoSel
   )
@@ -282,55 +385,107 @@ export function CadastroForm() {
     }
   }
 
-  const handleSave = async () => {
-    // Validation
-    const missingFields: string[] = []
+  const [fieldErrors, setFieldErrors] = useState<string[]>([])
+  const [loteFieldErrors, setLoteFieldErrors] = useState<string[]>([])
 
-    if (!descricao) missingFields.push("Descrição")
-    if (!categoria) missingFields.push("Categoria")
-    if (!grupo) missingFields.push("Grupo")
-    if (!secretariaSel) missingFields.push("Secretaria")
-    if (!departamentoSel) missingFields.push("Departamento")
-    if (!salaSel) missingFields.push("Sala")
-    if (!valorIndividual) missingFields.push("Valor")
-    if (!dataAquisicao) missingFields.push("Data de Aquisição")
-    if (!responsavelNome) missingFields.push("Nome do Responsável")
-    if (!responsavelCargo) missingFields.push("Cargo do Responsável")
+  const scrollToFirstError = () => {
+    window.setTimeout(() => {
+      const firstError = document.querySelector("[data-field-error='true']")
+      if (firstError) {
+        ;(firstError as HTMLElement).scrollIntoView({ behavior: "smooth", block: "center" })
+      }
+    }, 50)
+  }
+
+  const validateCodeAvailability = async (
+    codes: Array<{ code: string; field?: "patrimonio" | "patrimonioProvisorio"; itemIndex?: number }>,
+    contextLabel: string
+  ) => {
+    if (codes.length === 0) return true
+
+    const result = await api.validateBemCodes(codes)
+    if (result.available) return true
+
+    const firstConflict = result.conflicts?.[0]
+    const code = firstConflict?.conflictingCode || firstConflict?.code
+    const itemLabel =
+      typeof firstConflict?.itemIndex === "number" && codes.length > 1
+        ? ` na posição ${Number(firstConflict.itemIndex) + 1}`
+        : ""
+    const message = code
+      ? `O patrimônio ${code} já está em uso${itemLabel}. Ajuste a numeração informada antes de continuar.`
+      : `${contextLabel} contém um patrimônio já utilizado.`
+
+    toast({
+      title: "Patrimônio já em uso",
+      description: message,
+      variant: "destructive",
+      duration: 8000,
+    })
+
+    return false
+  }
+
+  const handleSave = async () => {
+    if (individualSubmitLockRef.current) return
+    const missingFields: string[] = []
+    const newFieldErrors: string[] = []
+
+    if (!descricao) { missingFields.push("Descrição"); newFieldErrors.push("descricao") }
+    if (!categoria) { missingFields.push("Categoria"); newFieldErrors.push("categoria") }
+    if (!grupo) { missingFields.push("Grupo"); newFieldErrors.push("grupo") }
+    if (!secretariaSel) { missingFields.push("Secretaria"); newFieldErrors.push("secretaria") }
+    if (!departamentoSel) { missingFields.push("Departamento"); newFieldErrors.push("departamento") }
+    if (!salaSel) { missingFields.push("Sala"); newFieldErrors.push("sala") }
+    if (!valorIndividual) { missingFields.push("Valor"); newFieldErrors.push("valor") }
+    if (!dataAquisicao) { missingFields.push("Data de Aquisição"); newFieldErrors.push("dataAquisicao") }
+    if (!responsavelNome) { missingFields.push("Nome do Responsável"); newFieldErrors.push("responsavelNome") }
+    if (!responsavelCargo) { missingFields.push("Cargo do Responsável"); newFieldErrors.push("responsavelCargo") }
+    if (!imagemPreview) { missingFields.push("Imagem do Bem"); newFieldErrors.push("imagem") }
 
     if (patrimonioTipo === "definitivo") {
-         // @ts-ignore
-         const pat = (document.getElementById("patrimonio") as HTMLInputElement)?.value
-         if (!pat) missingFields.push("Número do Patrimônio")
-    } else {
-         if (isManualProvisorio) {
-            if (!manualProvisorio) missingFields.push("Número Provisório")
-         }
-    }
-    
-    if (missingFields.length > 0) {
-        toast({ 
-            title: "Campos Obrigatórios Faltando", 
-            description: `Por favor, preencha os seguintes campos: ${missingFields.join(", ")}.`, 
-            variant: "destructive",
-            duration: 5000,
-        })
-        return
+      if (!patrimonioManual.trim()) { missingFields.push("Número do Patrimônio"); newFieldErrors.push("patrimonio") }
+    } else if (isManualProvisorio && !manualProvisorio) {
+      missingFields.push("Número Provisório")
+      newFieldErrors.push("manualProvisorio")
     }
 
+    setFieldErrors(newFieldErrors)
+    setSubmitErrorSummary(missingFields)
+
+    if (missingFields.length > 0) {
+      scrollToFirstError()
+      toast({
+        title: "Campos Obrigatórios Faltando",
+        description: (
+          <div className="flex flex-col gap-1">
+            <p>Por favor, preencha os seguintes campos obrigatórios:</p>
+            <ul className="list-disc pl-4 text-xs">
+              {missingFields.map((field, i) => <li key={i}>{field}</li>)}
+            </ul>
+          </div>
+        ),
+        variant: "destructive",
+        duration: 6000,
+      })
+      return
+    }
+
+    individualSubmitLockRef.current = true
     setIsSubmitting(true)
     try {
       const baseData: any = {
-        descricao: descricao,
-        categoria: categoria,
-        grupo: grupo,
+        descricao,
+        categoria,
+        grupo,
         marca: marcaSel,
-        modelo: modelo,
+        modelo,
         fornecedor: fornecedorSel,
         numeroSerie: serie,
         dataAquisicao: dataAquisicao ? dataAquisicao.toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
         valor: parseCurrency(valorIndividual),
         tempoGarantia: tempoGarantia ? parseInt(tempoGarantia) : undefined,
-        estadoConservacao: estadoConservacao,
+        estadoConservacao,
         localizacao: {
           secretaria: secretariaSel,
           departamento: departamentoSel,
@@ -343,34 +498,70 @@ export function CadastroForm() {
         status: "ativo",
         patrimonioTipo,
         quantidade,
-        imagem: imagemPreview
+        imagem: imagemPreview,
+        notaFiscal: notaFiscalPdf,
+        emendaParlamentar,
+        observacoes,
+        tipoEntrada,
       }
 
       if (patrimonioTipo === "definitivo") {
-         // @ts-ignore
-         const pat = (document.getElementById("patrimonio") as HTMLInputElement)?.value
-         // @ts-ignore
-         baseData.patrimonio = pat
+        baseData.patrimonio = patrimonioManual.trim()
+      } else if (isManualProvisorio) {
+        const cleanCode = manualProvisorio.replace(/^PROV-\d{4}-/, '')
+        baseData.patrimonioProvisorio = `PROV-${provAno}-${cleanCode}`
       } else {
-         if (isManualProvisorio) {
-            // User wants standard format even for manual entry
-            // Check if user already typed full format to avoid double prefix
-            const cleanCode = manualProvisorio.replace(/^PROV-\d{4}-/, '')
-            baseData.patrimonioProvisorio = `PROV-${provAno}-${cleanCode}`
-         } else {
-            // @ts-ignore
-            baseData.patrimonioProvisorio = `PROV-${provAno}-AUTO` // Backend should handle auto-generation or we do it here? Usually backend.
-         }
+        baseData.patrimonioProvisorio = `PROV-${provAno}-AUTO`
+        baseData.patrimonioAutoGerado = true
       }
-      
-      // For vehicle
+
       if (categoria.includes("veicul")) {
-        // @ts-ignore
-        baseData.placa = (document.getElementById("placa") as HTMLInputElement)?.value
-        // @ts-ignore
-        baseData.ano = parseInt((document.getElementById("ano") as HTMLInputElement)?.value || "0")
-        // @ts-ignore
-        baseData.kmAtual = parseInt((document.getElementById("km") as HTMLInputElement)?.value || "0")
+        baseData.placa = placa
+        baseData.ano = parseInt(anoVeiculo || "0")
+        baseData.kmAtual = parseInt(kmAtualVeiculo || "0")
+      }
+
+      const codesToValidate: Array<{ code: string; field?: "patrimonio" | "patrimonioProvisorio"; itemIndex?: number }> = []
+      if (patrimonioTipo === "definitivo") {
+        const patrimonioInicial = patrimonioManual.trim()
+        if (patrimonioInicial) {
+          const generatedCodes = quantidade > 1
+            ? buildSequentialCodes(patrimonioInicial, quantidade)
+            : [{ code: patrimonioInicial, itemIndex: 0 }]
+
+          if (!generatedCodes) {
+            toast({
+              title: "Formato inválido",
+              description: "Use um patrimônio com sequência numérica final, como PAT-2026-00001.",
+              variant: "destructive",
+            })
+            return
+          }
+
+          codesToValidate.push(...generatedCodes.map((item) => ({ ...item, field: "patrimonio" as const })))
+        }
+      } else if (isManualProvisorio) {
+        const provisionalCode = `PROV-${provAno}-${manualProvisorio.replace(/^PROV-\d{4}-/, '')}`
+        const generatedCodes = quantidade > 1
+          ? buildSequentialCodes(provisionalCode, quantidade)
+          : [{ code: provisionalCode, itemIndex: 0 }]
+
+        if (!generatedCodes) {
+          toast({
+            title: "Formato inválido",
+            description: "Use um número provisório com sequência numérica final.",
+            variant: "destructive",
+          })
+          return
+        }
+
+        codesToValidate.push(...generatedCodes.map((item) => ({ ...item, field: "patrimonioProvisorio" as const })))
+      }
+
+      const canContinue = await validateCodeAvailability(codesToValidate, "O patrimônio informado")
+      if (!canContinue) {
+        setSubmitErrorSummary([codesToValidate[0] ? `O patrimônio ${codesToValidate[0].code} precisa ser ajustado antes do cadastro.` : "A numeração informada precisa ser ajustada antes do cadastro."])
+        return
       }
 
       await api.createBem(baseData)
@@ -381,11 +572,11 @@ export function CadastroForm() {
         title: "Sucesso",
         description: msg,
       })
-      
+
       setSavedMessage(msg)
       setSaved(true)
-      
-      // Reset form fields
+      setSubmitErrorSummary([])
+      setFieldErrors([])
       setDescricao("")
       setCategoria("")
       setGrupo("")
@@ -397,35 +588,47 @@ export function CadastroForm() {
       setTempoGarantia("")
       setQuantidade(1)
       setImagemPreview(null)
+      setNotaFiscalPdf(null)
+      setEmendaParlamentar("")
       setManualProvisorio("")
-      
-      // Reset responsavel
+      setPatrimonioManual("")
+      setObservacoes("")
+      setTipoEntrada("compra")
+      setPlaca("")
+      setAnoVeiculo("")
+      setKmAtualVeiculo("")
       setResponsavelNome("")
       setResponsavelCargo("")
-
-      // Optional: Reset location? User might want to keep it for next item. 
-      // User said "duplicar o mesmo objeto", which implies identifying data.
-      // Resetting identification data should be enough.
-      
-      // Reset uncontrolled inputs
-      const idsToReset = ["descricao", "modelo", "serie", "valor", "observacoes", "placa", "ano", "km", "patrimonio", "manual-prov"]
-      idsToReset.forEach(id => {
-        const el = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement
-        if (el) el.value = ""
-      })
-      
       setTimeout(() => setSaved(false), 5000)
-    } catch (error) {
+    } catch (error: any) {
       console.error(error)
+      let msg = getApiErrorMessage(error, "Não foi possível cadastrar o bem. Verifique os dados e tente novamente.")
+      let title = "Erro ao cadastrar"
+      if (isApiError(error) && error.status === 409) {
+        title = "Patrimônio já existe"
+        const conflictingCode = error.body?.conflictingCode
+        msg = conflictingCode
+          ? `O patrimônio ${conflictingCode} já está em uso. Informe outro número para continuar.`
+          : getApiErrorMessage(error, msg)
+      }
+
+      if (!isApiError(error) && (msg.includes("duplicação") || msg.includes("Duplicate entry"))) {
+        title = "Patrimônio Já Existe"
+        msg = "Este número de patrimônio já está cadastrado no sistema. Por favor, verifique se digitou corretamente ou utilize um outro número para este equipamento."
+      }
+
       toast({
-        title: "Erro ao cadastrar",
-        description: "Não foi possível cadastrar o bem. Verifique os dados e tente novamente.",
+        title,
+        description: msg,
         variant: "destructive",
+        duration: 8000,
       })
-      setSavedMessage("Erro ao cadastrar bem.")
-      setSaved(true) // Show error
+      setSavedMessage(msg)
+      setSaved(true)
+      setSubmitErrorSummary([msg])
     } finally {
       setIsSubmitting(false)
+      individualSubmitLockRef.current = false
     }
   }
 
@@ -433,7 +636,7 @@ export function CadastroForm() {
   const addLoteItem = () => {
     setLoteItems((prev) => [
       ...prev,
-      { id: String(Date.now()), descricao: "", categoria: "", grupo: "", marca: "", modelo: "", fornecedor: "", valor: "", quantidade: 1, imagem: null },
+      { id: String(Date.now()), descricao: "", categoria: "", grupo: "", marca: "", modelo: "", fornecedor: "", valor: "", tempoGarantia: "", quantidade: 1, imagem: null, patrimonioInicial: "", emendaParlamentar: "" },
     ])
   }
 
@@ -445,6 +648,10 @@ export function CadastroForm() {
     setLoteItems((prev) =>
       prev.map((item) => (item.id === id ? { ...item, [field]: value } : item))
     )
+    const itemFieldKey = `item-${id}-${field}`
+    if (loteFieldErrors.includes(itemFieldKey)) {
+      setLoteFieldErrors((prev) => prev.filter((error) => error !== itemFieldKey))
+    }
   }
 
   const handleLoteImageChange = (id: string, e: React.ChangeEvent<HTMLInputElement>) => {
@@ -457,6 +664,10 @@ export function CadastroForm() {
        setLoteItems((prev) =>
          prev.map((item) => (item.id === id ? { ...item, imagem: result } : item))
        )
+       const itemFieldKey = `item-${id}-imagem`
+       if (loteFieldErrors.includes(itemFieldKey)) {
+         setLoteFieldErrors((prev) => prev.filter((error) => error !== itemFieldKey))
+       }
     }
     reader.readAsDataURL(file)
     e.target.value = ""
@@ -469,34 +680,40 @@ export function CadastroForm() {
   }
 
   const handleSaveLote = async () => {
+    if (loteSubmitLockRef.current) return
     // Validation
     const errors: string[] = []
+    const newLoteFieldErrors: string[] = []
 
     if (loteItems.length === 0) errors.push("Adicione pelo menos um item ao lote.")
-    if (!secretariaSel) errors.push("Secretaria")
-    if (!departamentoSel) errors.push("Departamento")
-    if (!salaSel) errors.push("Sala")
-    if (!responsavelNome) errors.push("Responsável")
+    if (!secretariaSel) { errors.push("Secretaria"); newLoteFieldErrors.push("secretaria"); }
+    if (!departamentoSel) { errors.push("Departamento"); newLoteFieldErrors.push("departamento"); }
+    if (!salaSel) { errors.push("Sala"); newLoteFieldErrors.push("sala"); }
+    if (!responsavelNome) { errors.push("Responsável"); newLoteFieldErrors.push("responsavelNome"); }
     
     // Check individual items
     loteItems.forEach((item, index) => {
         const itemErrors = []
-        if (!item.descricao) itemErrors.push("Descrição")
-        if (!item.categoria) itemErrors.push("Categoria")
-        if (!item.grupo) itemErrors.push("Grupo")
+        if (!item.descricao) { itemErrors.push("Descrição"); newLoteFieldErrors.push(`item-${item.id}-descricao`); }
+        if (!item.categoria) { itemErrors.push("Categoria"); newLoteFieldErrors.push(`item-${item.id}-categoria`); }
+        if (!item.grupo) { itemErrors.push("Grupo"); newLoteFieldErrors.push(`item-${item.id}-grupo`); }
+        if (!item.valor) { itemErrors.push("Valor"); newLoteFieldErrors.push(`item-${item.id}-valor`); }
+        if (!item.imagem) { itemErrors.push("Imagem"); newLoteFieldErrors.push(`item-${item.id}-imagem`); }
         
         if (itemErrors.length > 0) {
             errors.push(`Item ${index + 1}: ${itemErrors.join(", ")}`)
         }
     })
     
-    if (patrimonioTipo === "definitivo") {
-        if (!lotePatrimonioInicial) errors.push("Patrimônio Inicial")
-    } else if (isManualProvisorio && !manualProvisorio) {
-        errors.push("Número Provisório Inicial")
+    if (patrimonioTipo !== "definitivo" && isManualProvisorio && !manualProvisorio) {
+        errors.push("Número Provisório Inicial"); newLoteFieldErrors.push("manualProvisorio");
     }
 
+    setLoteFieldErrors(newLoteFieldErrors)
+    setLoteSubmitErrorSummary(errors)
+
     if (errors.length > 0) {
+        scrollToFirstError()
         toast({
             title: "Erros de Validação",
             description: (
@@ -518,8 +735,11 @@ export function CadastroForm() {
     let patNumber = 0
     let patPadding = 0
     
-    if (patrimonioTipo === "definitivo") {
-        const match = lotePatrimonioInicial.match(/^(.*?)(\d+)$/)
+    const hasManualDefinitiveStart = Boolean(lotePatrimonioInicial.trim())
+
+    if (patrimonioTipo === "definitivo" && hasManualDefinitiveStart) {
+        let patrimonioInicialEfetivo = lotePatrimonioInicial.trim()
+        const match = patrimonioInicialEfetivo.match(/^(.*?)(\d+)$/)
         if (match) {
             patPrefix = match[1]
             patNumber = parseInt(match[2])
@@ -539,11 +759,27 @@ export function CadastroForm() {
         }
     }
 
+    const generatedManualCodes = new Map<string, number>()
+
+    loteSubmitLockRef.current = true
+    setIsSubmitting(true)
+
     try {
       // Prepare batch data
       const batchData: any[] = []
       
-      for (const item of loteItems) {
+      for (let loteItemIndex = 0; loteItemIndex < loteItems.length; loteItemIndex++) {
+          const item = loteItems[loteItemIndex]
+          // Check for item-specific start number
+          if (patrimonioTipo === "definitivo" && item.patrimonioInicial) {
+              const match = item.patrimonioInicial.match(/^(.*?)(\d+)$/)
+              if (match) {
+                  patPrefix = match[1]
+                  patNumber = parseInt(match[2])
+                  patPadding = match[2].length
+              }
+          }
+
           const qtd = item.quantidade || 1
           for (let i = 0; i < qtd; i++) {
               const newItem: any = {
@@ -554,6 +790,7 @@ export function CadastroForm() {
                 modelo: item.modelo,
                 fornecedor: item.fornecedor,
                 valor: parseCurrency(item.valor),
+                tempoGarantia: item.tempoGarantia ? parseInt(item.tempoGarantia) : undefined,
                 localizacao: {
                   secretaria: secretariaSel,
                   departamento: departamentoSel,
@@ -565,12 +802,31 @@ export function CadastroForm() {
                 },
                 status: "ativo",
                 patrimonioTipo: patrimonioTipo,
-                imagem: item.imagem
+                imagem: item.imagem,
+                notaFiscal: notaFiscalPdf,
+                emendaParlamentar: item.emendaParlamentar,
+                tipoEntrada,
               }
               
-              if (patrimonioTipo === "definitivo") {
+              if (patrimonioTipo === "definitivo" && (hasManualDefinitiveStart || item.patrimonioInicial)) {
                   const numStr = String(patNumber).padStart(patPadding, '0')
                   newItem.patrimonio = `${patPrefix}${numStr}`
+                  const normalizedCode = newItem.patrimonio.trim().toUpperCase()
+                  const previousItemIndex = generatedManualCodes.get(normalizedCode)
+                  if (typeof previousItemIndex === "number") {
+                    const conflictMessage = formatLocalConflictMessage(newItem.patrimonio, previousItemIndex, loteItemIndex)
+                    toast({
+                      title: "Patrimônio duplicado no lote",
+                      description: conflictMessage,
+                      variant: "destructive",
+                      duration: 8000,
+                    })
+                    setLoteSavedMessage(conflictMessage)
+                    setLoteSaved(true)
+                    setLoteSubmitErrorSummary([conflictMessage])
+                    return
+                  }
+                  generatedManualCodes.set(normalizedCode, loteItemIndex)
                   patNumber++
               } else {
                   if (isManualProvisorio) {
@@ -586,10 +842,30 @@ export function CadastroForm() {
           }
       }
       
-      // We need an API endpoint for batch creation or loop
-      for (const item of batchData) {
-         await api.createBem(item)
+      const explicitCodes = batchData.flatMap((item, index) => {
+        const entries: Array<{ code: string; field?: "patrimonio" | "patrimonioProvisorio"; itemIndex?: number }> = []
+        if (item.patrimonio && !String(item.patrimonio).includes("AUTO")) {
+          entries.push({ code: item.patrimonio, field: "patrimonio", itemIndex: index })
+        }
+        if (item.patrimonioProvisorio && !String(item.patrimonioProvisorio).includes("AUTO")) {
+          entries.push({ code: item.patrimonioProvisorio, field: "patrimonioProvisorio", itemIndex: index })
+        }
+        return entries
+      })
+
+      const canContinue = await validateCodeAvailability(explicitCodes, "A numeração informada para o lote")
+      if (!canContinue) {
+        setLoteSavedMessage("Existe conflito na numeração manual informada para o lote.")
+        setLoteSaved(true)
+        setLoteSubmitErrorSummary(["Existe conflito na numeração manual informada para o lote."])
+        return
       }
+
+      // Send entire batch in one request for better performance and deduplication
+      if (batchData.length > 0) {
+          await api.createBem(batchData)
+      }
+      
       mutate("/api/bens/grupos")
 
       const totalItems = loteItems.reduce((sum, item) => sum + (item.quantidade || 1), 0)
@@ -602,24 +878,107 @@ export function CadastroForm() {
       
       setLoteSavedMessage(msg)
       setLoteSaved(true)
-      setLoteItems([{ id: "1", descricao: "", categoria: "", grupo: "", marca: "", modelo: "", fornecedor: "", valor: "", quantidade: 1, imagem: null }])
+      setLoteSubmitErrorSummary([])
+      setLoteFieldErrors([])
+      setLoteItems([{ id: "1", descricao: "", categoria: "", grupo: "", marca: "", modelo: "", fornecedor: "", valor: "", tempoGarantia: "", quantidade: 1, imagem: null, emendaParlamentar: "" }])
+      setNotaFiscalPdf(null)
+      setTipoEntrada("compra")
       setTimeout(() => setLoteSaved(false), 5000)
-    } catch (e) {
+    } catch (e: any) {
       console.error(e)
+      let msg = getApiErrorMessage(e, "Ocorreu um erro ao salvar o lote.")
+      let title = "Erro ao cadastrar lote"
+
+      if (isApiError(e) && e.status === 409) {
+          title = "Patrimônio já existe"
+          const conflictingCode = e.body?.conflictingCode
+          const itemIndex = typeof e.body?.itemIndex === "number" ? e.body.itemIndex + 1 : null
+          msg = conflictingCode
+            ? `O patrimônio ${conflictingCode} já está em uso${itemIndex ? ` no item ${itemIndex}` : ""}. Ajuste o número informado e tente novamente.`
+            : msg
+      }
+
+      if (!isApiError(e) && (msg.includes("duplicação") || msg.includes("Duplicate entry"))) {
+          title = "Patrimônio Já Existe"
+          msg = "Este número de patrimônio já está cadastrado no sistema. Por favor, verifique se digitou corretamente ou utilize um outro número."
+      }
+
       toast({
-        title: "Erro ao cadastrar lote",
-        description: "Ocorreu um erro ao salvar o lote. Verifique o console.",
+        title: title,
+        description: msg,
         variant: "destructive",
+        duration: 8000,
       })
-      setLoteSavedMessage("Erro ao salvar lote.")
+      setLoteSavedMessage(msg)
       setLoteSaved(true)
+      setLoteSubmitErrorSummary([msg])
+    } finally {
+      setIsSubmitting(false)
+      loteSubmitLockRef.current = false
     }
+  }
+
+  const handleAssetSelect = (asset: any) => {
+    // Populate Individual Form
+    setDescricao(asset.descricao || "")
+    setCategoria(asset.categoria || "")
+    setGrupo(asset.grupo || "")
+    setMarcaSel(asset.marca || "")
+    setModelo(asset.modelo || "")
+    setFornecedorSel(asset.fornecedor || "")
+    
+    // Valor might need formatting if it comes as number
+    if (asset.valor) {
+        setValorIndividual(asset.valor.toLocaleString("pt-BR", { minimumFractionDigits: 2 }))
+    }
+    
+    if (asset.tempoGarantia) setTempoGarantia(asset.tempoGarantia.toString())
+    
+    if (asset.emendaParlamentar) setEmendaParlamentar(asset.emendaParlamentar)
+
+    // Image
+    if (asset.imagem) {
+        setImagemPreview(asset.imagem)
+    }
+
+    // Set field errors to empty for filled fields
+    setFieldErrors([])
+
+    toast({
+        title: "Dados carregados",
+        description: "Os campos foram preenchidos com base no bem selecionado.",
+    })
+  }
+
+  const handleLoteAssetSelect = (asset: any) => {
+      const newItem: LoteItem = {
+          id: String(Date.now()),
+          descricao: asset.descricao || "",
+          categoria: asset.categoria || "",
+          grupo: asset.grupo || "",
+          marca: asset.marca || "",
+          modelo: asset.modelo || "",
+          fornecedor: asset.fornecedor || "",
+          valor: asset.valor ? asset.valor.toLocaleString("pt-BR", { minimumFractionDigits: 2 }) : "",
+          tempoGarantia: asset.tempoGarantia ? asset.tempoGarantia.toString() : "",
+          quantidade: 1,
+          imagem: asset.imagem || null,
+          patrimonioInicial: "",
+          emendaParlamentar: asset.emendaParlamentar || ""
+      }
+      
+      setLoteItems(prev => [...prev, newItem])
+      
+      toast({
+          title: "Item adicionado",
+          description: "O item foi adicionado à lista com os dados do bem selecionado.",
+      })
   }
 
   const isVeiculo = categoria.includes("veicul")
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-6 pb-20">
       {/* Page title */}
       <div>
         <h1 className="text-2xl font-bold tracking-tight text-balance">Cadastrar Bem Patrimonial</h1>
@@ -730,6 +1089,26 @@ export function CadastroForm() {
       {/* Lote Manual mode */}
       {modoEntrada === "lote" && (
         <>
+          {loteSubmitErrorSummary.length > 0 && (
+            <Card className="border-destructive/40 bg-destructive/5" data-field-error="true">
+              <CardContent className="pt-6">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-medium text-destructive">
+                      {loteSubmitErrorSummary.length} pendencia(s) impedem o cadastro do lote
+                    </p>
+                    <ul className="mt-1 list-disc pl-4 text-xs text-destructive/90">
+                      {loteSubmitErrorSummary.slice(0, 6).map((item, index) => (
+                        <li key={`${item}-${index}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           <PatrimonioTypeSelector 
             value={patrimonioTipo}
             onChange={setPatrimonioTipo}
@@ -741,6 +1120,21 @@ export function CadastroForm() {
             setManualStartNumber={setManualProvisorio}
           />
 
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Adicionar Item Existente</CardTitle>
+              <CardDescription>
+                Busque um bem já cadastrado para aproveitar os dados e adicionar ao lote
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <AssetSearchSelector 
+                onSelect={handleLoteAssetSelect}
+                placeholder="Buscar bem para adicionar ao lote..."
+              />
+            </CardContent>
+          </Card>
+
           {/* Shared location and responsible */}
           <Card>
             <CardHeader>
@@ -749,32 +1143,45 @@ export function CadastroForm() {
                 Todos os itens do lote serao cadastrados nesta localizacao
               </CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
-                <div className="flex flex-col gap-2">
-                  <Label required>Secretaria</Label>
-                  <SearchableSelect
-                    value={secretariaSel}
-                    onValueChange={(v) => { setSecretariaSel(v); setDepartamentoSel(""); setSalaSel(""); }}
-                    placeholder="Selecione a secretaria"
-                    searchPlaceholder="Buscar secretaria..."
-                    disabled={user?.role === "assistente"}
-                    items={secretarias.map((s) => ({
-                      value: s.nome,
-                      label: s.nome,
-                    }))}
-                  />
-                </div>
-                <div className="flex flex-col gap-2">
-                  <Label required>Departamento</Label>
-                  <div className="flex gap-2">
-                    <div className="w-full">
+            <CardContent className="space-y-5">
+              <div className="grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.95fr)]">
+                <div className="space-y-4 rounded-lg border bg-muted/20 p-4">
+                  <div className="space-y-1">
+                    <h4 className="text-sm font-semibold">Localizacao</h4>
+                    <p className="text-xs text-muted-foreground">
+                      Secretaria, departamento e sala compartilhados por todos os itens do lote.
+                    </p>
+                  </div>
+                  <div className="grid gap-4">
+                    <div className="flex min-w-0 flex-col gap-2">
+                      <Label required className={loteFieldErrors.includes("secretaria") ? "text-destructive" : ""}>Secretaria</Label>
+                      <div className="min-w-0">
+                        <SearchableSelect
+                          value={secretariaSel}
+                          onValueChange={(v) => { setSecretariaSel(v); setDepartamentoSel(""); setSalaSel(""); }}
+                          placeholder="Selecione a secretaria"
+                          searchPlaceholder="Buscar secretaria..."
+                          disabled={user?.role === "assistente"}
+                          className={loteFieldErrors.includes("secretaria") ? "border-destructive ring-offset-destructive" : ""}
+                          items={(secretarias as Secretaria[]).map((s) => ({
+                            value: s.nome,
+                            label: s.nome,
+                          }))}
+                        />
+                      </div>
+                    </div>
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <div className="flex min-w-0 flex-col gap-2">
+                  <Label required className={loteFieldErrors.includes("departamento") ? "text-destructive" : ""}>Departamento</Label>
+                  <div className="flex min-w-0 items-start gap-2">
+                    <div className="min-w-0 flex-1">
                       <SearchableSelect
                         value={departamentoSel}
                         onValueChange={(v) => { setDepartamentoSel(v); setSalaSel(""); }}
                         disabled={!secretariaSel || user?.role === "assistente"}
                         placeholder="Selecione o departamento"
                         searchPlaceholder="Buscar departamento..."
+                        className={loteFieldErrors.includes("departamento") ? "border-destructive ring-offset-destructive" : ""}
                         items={selectedSecretaria?.departamentos.map((d) => ({
                           value: d.nome,
                           label: d.nome,
@@ -783,7 +1190,7 @@ export function CadastroForm() {
                     </div>
                     <Dialog open={isCreatingDept} onOpenChange={setIsCreatingDept}>
                       <DialogTrigger asChild>
-                        <Button variant="outline" size="icon" disabled={!secretariaSel} title="Criar Departamento">
+                        <Button variant="outline" size="icon" className="shrink-0" disabled={!secretariaSel} title="Criar Departamento">
                           <Plus className="h-4 w-4" />
                         </Button>
                       </DialogTrigger>
@@ -803,16 +1210,17 @@ export function CadastroForm() {
                     </Dialog>
                   </div>
                 </div>
-                <div className="flex flex-col gap-2">
-                  <Label required>Sala</Label>
-                  <div className="flex gap-2">
-                    <div className="w-full">
+                      <div className="flex min-w-0 flex-col gap-2">
+                  <Label required className={loteFieldErrors.includes("sala") ? "text-destructive" : ""}>Sala</Label>
+                  <div className="flex min-w-0 items-start gap-2">
+                    <div className="min-w-0 flex-1">
                       <SearchableSelect
                         value={salaSel}
                         onValueChange={setSalaSel}
                         disabled={!departamentoSel}
                         placeholder="Selecione a sala"
                         searchPlaceholder="Buscar sala..."
+                        className={loteFieldErrors.includes("sala") ? "border-destructive ring-offset-destructive" : ""}
                         items={selectedDepartamento?.salas.map((s) => ({
                           value: typeof s === 'string' ? s : s.nome,
                           label: typeof s === 'string' ? s : s.nome,
@@ -821,7 +1229,7 @@ export function CadastroForm() {
                     </div>
                     <Dialog open={isCreatingSala} onOpenChange={setIsCreatingSala}>
                       <DialogTrigger asChild>
-                        <Button variant="outline" size="icon" disabled={!departamentoSel} title="Criar Sala">
+                        <Button variant="outline" size="icon" className="shrink-0" disabled={!departamentoSel} title="Criar Sala">
                           <Plus className="h-4 w-4" />
                         </Button>
                       </DialogTrigger>
@@ -841,13 +1249,25 @@ export function CadastroForm() {
                     </Dialog>
                   </div>
                 </div>
-                <div className="flex flex-col gap-2">
-                  <Label required>Responsavel</Label>
+                    </div>
+                  </div>
+                </div>
+                <div className="space-y-4 rounded-lg border bg-muted/20 p-4">
+                  <div className="space-y-1">
+                    <h4 className="text-sm font-semibold">Responsavel</h4>
+                    <p className="text-xs text-muted-foreground">
+                      Dados compartilhados do responsavel principal deste lote.
+                    </p>
+                  </div>
+                  <div className="grid gap-4">
+                    <div className="flex min-w-0 flex-col gap-2">
+                  <Label required className={loteFieldErrors.includes("responsavelNome") ? "text-destructive" : ""}>Responsavel</Label>
                   <ResponsavelSelect 
                     value={responsavelNome}
                     onValueChange={setResponsavelNome}
                     onSelect={(s) => setResponsavelCargo(s.cargo || "")}
                     placeholder="Selecione o responsável"
+                    className={loteFieldErrors.includes("responsavelNome") ? "border-destructive ring-offset-destructive" : ""}
                   />
                 </div>
                 <div className="flex flex-col gap-2">
@@ -859,20 +1279,43 @@ export function CadastroForm() {
                   />
 
                 </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 pt-4 border-t">
+                <div className="flex flex-col gap-2 max-w-sm">
+                  <Label htmlFor="tipo-entrada-lote">Tipo de Entrada</Label>
+                  <Select value={tipoEntrada} onValueChange={(value: TipoEntradaBem) => setTipoEntrada(value)}>
+                    <SelectTrigger id="tipo-entrada-lote">
+                      <SelectValue placeholder="Selecione o tipo de entrada" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {tipoEntradaOptions.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Compra fica como padrão para agilizar o cadastro diário.
+                  </p>
+                </div>
               </div>
               
               {patrimonioTipo === "definitivo" && (
                 <div className="mt-4 pt-4 border-t">
                     <div className="flex flex-col gap-2 max-w-xs">
-                        <Label required>Patrimonio Inicial</Label>
+                        <Label>Patrimonio Inicial (Opcional)</Label>
                         <Input 
-                            placeholder="Ex: PAT-2025-0001" 
+                            placeholder="Ex: PAT-2026-00001" 
                             id="lote-pat-inicial"
                             value={lotePatrimonioInicial}
                             onChange={(e) => setLotePatrimonioInicial(e.target.value)}
                         />
                         <p className="text-xs text-muted-foreground">
-                            A sequencia sera gerada a partir deste numero.
+                            Se deixar em branco, o sistema gera automaticamente a sequencia definitiva.
                         </p>
                     </div>
                 </div>
@@ -880,26 +1323,107 @@ export function CadastroForm() {
             </CardContent>
           </Card>
 
-          {/* Lote items table */}
           <Card>
-            <CardHeader className="flex flex-row items-center justify-between">
+            <CardHeader>
+              <CardTitle className="text-base">Documentacao do Lote</CardTitle>
+              <CardDescription>
+                Anexe a Nota Fiscal valida para todo o lote (PDF)
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+                <input
+                ref={pdfInputRef}
+                type="file"
+                accept="application/pdf"
+                onChange={handlePdfChange}
+                className="hidden"
+                />
+                
+                {notaFiscalPdf ? (
+                <div className="flex items-center justify-between p-3 border rounded-lg bg-muted/50">
+                    <div className="flex items-center gap-3">
+                        <div className="h-10 w-10 rounded-lg bg-red-100 flex items-center justify-center">
+                            <FileText className="h-5 w-5 text-red-600" />
+                        </div>
+                        <div className="flex flex-col">
+                            <span className="text-sm font-medium">Nota Fiscal.pdf</span>
+                            <span className="text-xs text-muted-foreground">Anexado com sucesso</span>
+                        </div>
+                    </div>
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-destructive"
+                        onClick={() => setNotaFiscalPdf(null)}
+                    >
+                        <Trash2 className="h-4 w-4" />
+                    </Button>
+                </div>
+                ) : (
+                <Button 
+                    variant="outline" 
+                    className="w-full gap-2 border-dashed h-12"
+                    onClick={() => pdfInputRef.current?.click()}
+                >
+                    <FileText className="h-4 w-4 text-muted-foreground" />
+                    Anexar Nota Fiscal (PDF)
+                </Button>
+                )}
+            </CardContent>
+          </Card>
+
+          {/* Lote items table */}
+          <Card className={isTableMaximized ? "fixed inset-0 z-50 rounded-none h-screen flex flex-col bg-background shadow-2xl" : ""}>
+            <CardHeader className="flex flex-row items-center justify-between shrink-0">
               <div>
                 <CardTitle className="text-base">Itens do Lote</CardTitle>
                 <CardDescription>
                   Adicione varios itens diferentes. Cada linha pode ter uma quantidade diferente.
                 </CardDescription>
               </div>
-              <Button variant="outline" size="sm" onClick={addLoteItem}>
-                <Plus className="mr-2 h-4 w-4" />
-                Adicionar Item
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  onClick={() => setIsTableMaximized(!isTableMaximized)}
+                  title={isTableMaximized ? "Restaurar" : "Maximizar"}
+                >
+                  {isTableMaximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                </Button>
+                <Button variant="outline" size="sm" onClick={addLoteItem}>
+                  <Plus className="mr-2 h-4 w-4" />
+                  Adicionar Item
+                </Button>
+              </div>
             </CardHeader>
-            <CardContent>
+            <CardContent className={isTableMaximized ? "flex-1 overflow-auto p-4" : ""}>
+              {isTableMaximized && (
+                  <div className="mb-6 p-4 border rounded-lg bg-muted/30 shadow-sm">
+                      <div className="flex flex-col gap-2">
+                          <div className="flex items-center gap-2">
+                              <Package className="h-4 w-4 text-primary" />
+                              <h3 className="text-sm font-semibold">Adicionar Item Existente ao Lote</h3>
+                          </div>
+                          <p className="text-xs text-muted-foreground mb-2">
+                              Busque um bem já cadastrado para preencher os dados automaticamente e adicionar à lista abaixo.
+                          </p>
+                          <AssetSearchSelector 
+                            onSelect={handleLoteAssetSelect}
+                            placeholder="Buscar bem (nome, marca, modelo)..."
+                          />
+                      </div>
+                  </div>
+              )}
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b">
-                      <th className="text-center font-medium text-muted-foreground pb-2 pr-2 w-24">Img</th>
+                      <th className="text-center font-medium text-muted-foreground pb-2 pr-2 w-24">
+                        Img <span className="text-destructive">*</span>
+                      </th>
+                      {patrimonioTipo === "definitivo" && (
+                        <th className="text-left font-medium text-muted-foreground pb-2 pr-2 w-32">Pat. Inicial (Opcional)</th>
+                      )}
                       <th className="text-left font-medium text-muted-foreground pb-2 pr-2">Descricao</th>
                       <th className="text-left font-medium text-muted-foreground pb-2 pr-2">Categoria</th>
                       <th className="text-left font-medium text-muted-foreground pb-2 pr-2">Grupo</th>
@@ -907,6 +1431,8 @@ export function CadastroForm() {
                       <th className="text-left font-medium text-muted-foreground pb-2 pr-2">Fornecedor</th>
                       <th className="text-left font-medium text-muted-foreground pb-2 pr-2">Modelo</th>
                       <th className="text-left font-medium text-muted-foreground pb-2 pr-2">Valor (R$)</th>
+                      <th className="text-left font-medium text-muted-foreground pb-2 pr-2 w-24">Garantia</th>
+                      <th className="text-left font-medium text-muted-foreground pb-2 pr-2">Emenda</th>
                       <th className="text-left font-medium text-muted-foreground pb-2 pr-2 w-20">Qtd</th>
                       <th className="w-10 pb-2" />
                     </tr>
@@ -915,7 +1441,7 @@ export function CadastroForm() {
                     {loteItems.map((item) => (
                       <tr key={item.id} className="border-b last:border-0">
                         <td className="py-2 pr-2 align-middle">
-                          <div className="flex items-center justify-center gap-1">
+                          <div className={`flex items-center justify-center gap-1 p-1 rounded-md ${loteFieldErrors.includes(`item-${item.id}-imagem`) ? "border border-destructive bg-destructive/10" : ""}`}>
                             {item.imagem ? (
                               <div className="relative group">
                                 <img 
@@ -956,12 +1482,23 @@ export function CadastroForm() {
                             )}
                           </div>
                         </td>
+                        {patrimonioTipo === "definitivo" && (
+                          <td className="py-2 pr-2">
+                            <Input
+                              placeholder="Auto"
+                              value={item.patrimonioInicial || ""}
+                              onChange={(e) => updateLoteItem(item.id, "patrimonioInicial", e.target.value)}
+                              className="text-sm font-mono"
+                              title="Deixe em branco para seguir a sequencia automatica"
+                            />
+                          </td>
+                        )}
                         <td className="py-2 pr-2">
                           <Input
                             placeholder="Descricao do bem"
                             value={item.descricao}
                             onChange={(e) => updateLoteItem(item.id, "descricao", e.target.value)}
-                            className="text-sm"
+                            className={`text-sm ${loteFieldErrors.includes(`item-${item.id}-descricao`) ? "border-destructive focus-visible:ring-destructive" : ""}`}
                           />
                         </td>
                         <td className="py-2 pr-2">
@@ -969,7 +1506,7 @@ export function CadastroForm() {
                             value={item.categoria}
                             onValueChange={(v) => updateLoteItem(item.id, "categoria", v)}
                             placeholder="Selecione"
-                            className="w-full"
+                            className={`w-full ${loteFieldErrors.includes(`item-${item.id}-categoria`) ? "border-destructive ring-offset-destructive" : ""}`}
                           />
                         </td>
                         <td className="py-2 pr-2">
@@ -977,7 +1514,7 @@ export function CadastroForm() {
                             value={item.grupo}
                             onValueChange={(v) => updateLoteItem(item.id, "grupo", v)}
                             placeholder="Grupo"
-                            className="w-full"
+                            className={`w-full ${loteFieldErrors.includes(`item-${item.id}-grupo`) ? "border-destructive ring-offset-destructive" : ""}`}
                           />
                         </td>
                         <td className="py-2 pr-2">
@@ -1009,7 +1546,25 @@ export function CadastroForm() {
                             placeholder="0,00"
                             value={item.valor}
                             onChange={(e) => updateLoteItem(item.id, "valor", formatCurrency(e.target.value))}
+                            className={`text-sm ${loteFieldErrors.includes(`item-${item.id}-valor`) ? "border-destructive focus-visible:ring-destructive" : ""}`}
+                          />
+                        </td>
+                        <td className="py-2 pr-2">
+                          <Input
+                            type="number"
+                            min={0}
+                            placeholder="Meses"
+                            value={item.tempoGarantia || ""}
+                            onChange={(e) => updateLoteItem(item.id, "tempoGarantia", e.target.value)}
                             className="text-sm"
+                          />
+                        </td>
+                        <td className="py-2 pr-2">
+                          <Input
+                            placeholder="Nº Emenda"
+                            value={item.emendaParlamentar || ""}
+                            onChange={(e) => updateLoteItem(item.id, "emendaParlamentar", e.target.value)}
+                            className="text-sm w-32"
                           />
                         </td>
                         <td className="py-2 pr-2">
@@ -1060,9 +1615,11 @@ export function CadastroForm() {
               </div>
             )}
             <Button variant="outline" className="bg-transparent">Cancelar</Button>
-            <Button onClick={handleSaveLote} className="gap-2">
-              <Save className="h-4 w-4" />
-              Cadastrar Lote ({loteItems.reduce((sum, item) => sum + (item.quantidade || 1), 0)} itens)
+            <Button onClick={handleSaveLote} className="gap-2" disabled={isSubmitting}>
+              {isSubmitting ? <Clock className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              {isSubmitting
+                ? "Cadastrando lote..."
+                : `Cadastrar Lote (${loteItems.reduce((sum, item) => sum + (item.quantidade || 1), 0)} itens)`}
             </Button>
           </div>
         </>
@@ -1082,6 +1639,41 @@ export function CadastroForm() {
             manualStartNumber={manualProvisorio}
             setManualStartNumber={setManualProvisorio}
           />
+
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Reaproveitar Cadastro</CardTitle>
+              <CardDescription>
+                Busque um bem já cadastrado para preencher os campos automaticamente
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <AssetSearchSelector 
+                onSelect={handleAssetSelect}
+                placeholder="Buscar bem para preencher formulário..."
+              />
+            </CardContent>
+          </Card>
+
+          {submitErrorSummary.length > 0 && (
+            <Card className="border-destructive/40 bg-destructive/5" data-field-error="true">
+              <CardContent className="pt-6">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-medium text-destructive">
+                      {submitErrorSummary.length} pendencia(s) impedem o cadastro
+                    </p>
+                    <ul className="mt-1 list-disc pl-4 text-xs text-destructive/90">
+                      {submitErrorSummary.slice(0, 6).map((item, index) => (
+                        <li key={`${item}-${index}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           {/* Form tabs */}
           <Tabs defaultValue="geral" className="w-full">
@@ -1128,42 +1720,62 @@ export function CadastroForm() {
                             />
                         </div>
                     ) : (
-                      <div className="flex flex-col gap-2">
-                        <Label htmlFor="patrimonio" required>Numero de Patrimonio</Label>
+                      <div className="flex flex-col gap-2" data-field-error={fieldErrors.includes("patrimonio") ? "true" : undefined}>
+                        <Label htmlFor="patrimonio" required className={fieldErrors.includes("patrimonio") ? "text-destructive" : ""}>Numero de Patrimonio</Label>
                         <Input
                           id="patrimonio"
                           placeholder="PAT-2026-XXXXX"
+                          value={patrimonioManual}
+                          onChange={(e) => {
+                            setPatrimonioManual(e.target.value)
+                            if (fieldErrors.includes("patrimonio")) setFieldErrors((prev) => prev.filter((f) => f !== "patrimonio"))
+                            setSubmitErrorSummary((prev) => prev.filter((item) => item !== "NÃºmero do PatrimÃ´nio"))
+                          }}
+                          className={fieldErrors.includes("patrimonio") ? "border-destructive focus-visible:ring-destructive" : ""}
                         />
+                        {fieldErrors.includes("patrimonio") && (
+                          <p className="text-xs text-destructive">Informe o numero do patrimonio para continuar.</p>
+                        )}
                       </div>
                     )}
 
                     <div className="flex flex-col gap-2">
-                      <Label htmlFor="descricao" required>Descricao do Bem</Label>
+                      <Label htmlFor="descricao" required className={fieldErrors.includes("descricao") ? "text-destructive" : ""}>Descricao do Bem</Label>
                       <Input 
                         id="descricao" 
                         placeholder="Ex: Computador Dell OptiPlex 7010" 
                         value={descricao}
-                        onChange={(e) => setDescricao(e.target.value)}
+                        onChange={(e) => {
+                            setDescricao(e.target.value)
+                            if (fieldErrors.includes("descricao")) setFieldErrors(prev => prev.filter(f => f !== "descricao"))
+                        }}
+                        className={fieldErrors.includes("descricao") ? "border-destructive focus-visible:ring-destructive" : ""}
                       />
                     </div>
 
                     <div className="flex flex-col gap-2">
-                      <Label htmlFor="categoria" required>Categoria</Label>
+                      <Label htmlFor="categoria" required className={fieldErrors.includes("categoria") ? "text-destructive" : ""}>Categoria</Label>
                       <CategoriaSelector
                         value={categoria}
-                        onValueChange={(v) => setCategoria(v as AssetCategory)}
+                        onValueChange={(v) => {
+                            setCategoria(v as AssetCategory)
+                            if (fieldErrors.includes("categoria")) setFieldErrors(prev => prev.filter(f => f !== "categoria"))
+                        }}
                         placeholder="Selecione ou crie uma categoria"
-                        className="w-full"
+                        className={fieldErrors.includes("categoria") ? "border-destructive ring-offset-destructive" : "w-full"}
                       />
                     </div>
 
                     <div className="flex flex-col gap-2">
-                      <Label htmlFor="grupo" required>Grupo</Label>
+                      <Label htmlFor="grupo" required className={fieldErrors.includes("grupo") ? "text-destructive" : ""}>Grupo</Label>
                       <GroupSelector
                         value={grupo}
-                        onValueChange={setGrupo}
+                        onValueChange={(v) => {
+                            setGrupo(v)
+                            if (fieldErrors.includes("grupo")) setFieldErrors(prev => prev.filter(f => f !== "grupo"))
+                        }}
                         placeholder="Selecione ou crie um grupo (ex: No Break, Computador)"
-                        className="w-full"
+                        className={fieldErrors.includes("grupo") ? "border-destructive ring-offset-destructive" : "w-full"}
                       />
                     </div>
 
@@ -1211,16 +1823,41 @@ export function CadastroForm() {
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                       <div className="flex flex-col gap-2">
-                        <Label required>Data de Aquisicao</Label>
-                        <DatePicker date={dataAquisicao} setDate={setDataAquisicao} />
+                        <Label htmlFor="tipoEntrada">Tipo de Entrada</Label>
+                        <Select value={tipoEntrada} onValueChange={(value: TipoEntradaBem) => setTipoEntrada(value)}>
+                          <SelectTrigger id="tipoEntrada">
+                            <SelectValue placeholder="Selecione o tipo de entrada" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {tipoEntradaOptions.map((option) => (
+                              <SelectItem key={option.value} value={option.value}>
+                                {option.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
                       </div>
                       <div className="flex flex-col gap-2">
-                        <Label htmlFor="valor" required>Valor (R$)</Label>
+                        <Label required className={fieldErrors.includes("dataAquisicao") ? "text-destructive" : ""}>Data de Aquisicao</Label>
+                        <DatePicker 
+                          date={dataAquisicao} 
+                          setDate={(d) => {
+                              setDataAquisicao(d)
+                              if (d && fieldErrors.includes("dataAquisicao")) setFieldErrors(prev => prev.filter(f => f !== "dataAquisicao"))
+                          }} 
+                        />
+                      </div>
+                      <div className="flex flex-col gap-2">
+                        <Label htmlFor="valor" required className={fieldErrors.includes("valor") ? "text-destructive" : ""}>Valor (R$)</Label>
                         <Input
                           id="valor"
                           placeholder="R$ 0,00"
                           value={valorIndividual}
-                          onChange={(e) => setValorIndividual(formatCurrency(e.target.value))}
+                          onChange={(e) => {
+                              setValorIndividual(formatCurrency(e.target.value))
+                              if (fieldErrors.includes("valor")) setFieldErrors(prev => prev.filter(f => f !== "valor"))
+                          }}
+                          className={fieldErrors.includes("valor") ? "border-destructive focus-visible:ring-destructive" : ""}
                         />
                       </div>
                       <div className="flex flex-col gap-2">
@@ -1234,18 +1871,32 @@ export function CadastroForm() {
                         />
                       </div>
                       <div className="flex flex-col gap-2">
-                        <Label htmlFor="quantidade">Quantidade</Label>
-                        <Input
-                          id="quantidade"
-                          type="number"
-                          min={1}
-                          value={quantidade}
-                          onChange={(e) => setQuantidade(Math.max(1, parseInt(e.target.value) || 1))}
-                        />
-                      </div>
+                      <Label htmlFor="quantidade">Quantidade</Label>
+                      <Input
+                        id="quantidade"
+                        type="number"
+                        min={1}
+                        value={quantidade}
+                        onChange={(e) => setQuantidade(Math.max(1, parseInt(e.target.value) || 1))}
+                      />
                     </div>
-                    {quantidade > 1 && (
-                      <div className="flex items-start gap-2 rounded-lg bg-info/10 p-3">
+                  </div>
+
+                  <div className="flex flex-col gap-2 mt-4">
+                      <Label htmlFor="emenda">Emenda Parlamentar (Opcional)</Label>
+                      <Input
+                          id="emenda"
+                          placeholder="Ex: Emenda nº 123/2025 - Deputado Fulano"
+                          value={emendaParlamentar}
+                          onChange={(e) => setEmendaParlamentar(e.target.value)}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                          Informe se este bem foi adquirido atraves de emenda parlamentar.
+                      </p>
+                  </div>
+
+                  {quantidade > 1 && (
+                    <div className="flex items-start gap-2 rounded-lg bg-info/10 p-3 mt-4">
                         <Info className="h-4 w-4 text-info shrink-0 mt-0.5" />
                         <p className="text-xs text-muted-foreground">
                           Serao gerados <strong className="text-foreground">{quantidade} patrimonios</strong> automaticamente com numeros sequenciais.
@@ -1280,18 +1931,20 @@ export function CadastroForm() {
                     </CardHeader>
                     <CardContent className="flex flex-col gap-4">
                       <div className="flex flex-col gap-2">
-                        <Label htmlFor="secretaria" required>Secretaria</Label>
+                        <Label htmlFor="secretaria" required className={fieldErrors.includes("secretaria") ? "text-destructive" : ""}>Secretaria</Label>
                         <SearchableSelect
                           value={secretariaSel}
                           onValueChange={(v) => {
                             setSecretariaSel(v)
                             setDepartamentoSel("")
                             setSalaSel("")
+                            if (fieldErrors.includes("secretaria")) setFieldErrors(prev => prev.filter(f => f !== "secretaria"))
                           }}
                           placeholder="Selecione a secretaria"
                           searchPlaceholder="Buscar secretaria..."
                           disabled={user?.role === "assistente"}
-                          items={secretarias.map((s) => ({
+                          className={fieldErrors.includes("secretaria") ? "border-destructive ring-offset-destructive" : ""}
+                          items={(secretarias as Secretaria[]).map((s) => ({
                             value: s.nome,
                             label: s.nome,
                           }))}
@@ -1299,7 +1952,7 @@ export function CadastroForm() {
                       </div>
 
                       <div className="flex flex-col gap-2">
-                        <Label htmlFor="departamento" required>Departamento</Label>
+                        <Label htmlFor="departamento" required className={fieldErrors.includes("departamento") ? "text-destructive" : ""}>Departamento</Label>
                         <div className="flex gap-2">
                           <div className="w-full">
                             <SearchableSelect
@@ -1307,10 +1960,12 @@ export function CadastroForm() {
                               onValueChange={(v) => {
                                 setDepartamentoSel(v)
                                 setSalaSel("")
+                                if (fieldErrors.includes("departamento")) setFieldErrors(prev => prev.filter(f => f !== "departamento"))
                               }}
                               disabled={!secretariaSel || user?.role === "assistente"}
                               placeholder="Selecione o departamento"
                               searchPlaceholder="Buscar departamento..."
+                              className={fieldErrors.includes("departamento") ? "border-destructive ring-offset-destructive" : ""}
                               items={selectedSecretaria?.departamentos.map((d) => ({
                                 value: d.nome,
                                 label: d.nome,
@@ -1342,15 +1997,19 @@ export function CadastroForm() {
                       </div>
 
                       <div className="flex flex-col gap-2">
-                        <Label htmlFor="sala" required>Sala</Label>
+                        <Label htmlFor="sala" required className={fieldErrors.includes("sala") ? "text-destructive" : ""}>Sala</Label>
                         <div className="flex gap-2">
                           <div className="w-full">
                             <SearchableSelect
                               value={salaSel}
-                              onValueChange={setSalaSel}
+                              onValueChange={(v) => {
+                                  setSalaSel(v)
+                                  if (fieldErrors.includes("sala")) setFieldErrors(prev => prev.filter(f => f !== "sala"))
+                              }}
                               disabled={!departamentoSel}
                               placeholder="Selecione a sala"
                               searchPlaceholder="Buscar sala..."
+                              className={fieldErrors.includes("sala") ? "border-destructive ring-offset-destructive" : ""}
                               items={selectedDepartamento?.salas.map((s) => ({
                                 value: typeof s === 'string' ? s : s.nome,
                                 label: typeof s === 'string' ? s : s.nome,
@@ -1389,20 +2048,31 @@ export function CadastroForm() {
                     </CardHeader>
                     <CardContent className="flex flex-col gap-4">
                       <div className="flex flex-col gap-2">
-                        <Label required>Nome do Responsavel</Label>
+                        <Label required className={fieldErrors.includes("responsavelNome") ? "text-destructive" : ""}>Nome do Responsavel</Label>
                         <ResponsavelSelect 
                             value={responsavelNome}
-                            onValueChange={setResponsavelNome}
-                            onSelect={(s) => setResponsavelCargo(s.cargo || "")}
+                            onValueChange={(v) => {
+                                setResponsavelNome(v)
+                                if (fieldErrors.includes("responsavelNome")) setFieldErrors(prev => prev.filter(f => f !== "responsavelNome"))
+                            }}
+                            onSelect={(s) => {
+                                setResponsavelCargo(s.cargo || "")
+                                if (fieldErrors.includes("responsavelCargo")) setFieldErrors(prev => prev.filter(f => f !== "responsavelCargo"))
+                            }}
                             placeholder="Selecione o responsável"
+                            className={fieldErrors.includes("responsavelNome") ? "border-destructive ring-offset-destructive" : ""}
                         />
                       </div>
                       <div className="flex flex-col gap-2">
-                        <Label required>Cargo</Label>
+                        <Label required className={fieldErrors.includes("responsavelCargo") ? "text-destructive" : ""}>Cargo</Label>
                         <Input 
                             value={responsavelCargo || ""}
-                            onChange={(e) => setResponsavelCargo(e.target.value)}
+                            onChange={(e) => {
+                                setResponsavelCargo(e.target.value)
+                                if (fieldErrors.includes("responsavelCargo")) setFieldErrors(prev => prev.filter(f => f !== "responsavelCargo"))
+                            }}
                             placeholder="Ex: Coordenadora de RH"
+                            className={fieldErrors.includes("responsavelCargo") ? "border-destructive focus-visible:ring-destructive" : ""}
                         />
 
                       </div>
@@ -1418,13 +2088,66 @@ export function CadastroForm() {
                         id="observacoes"
                         placeholder="Informacoes adicionais sobre o bem..."
                         className="min-h-24"
+                        value={observacoes}
+                        onChange={(e) => setObservacoes(e.target.value)}
                       />
                     </CardContent>
                   </Card>
 
                   <Card>
                     <CardHeader>
-                      <CardTitle className="text-base">Imagem do Bem</CardTitle>
+                      <CardTitle className="text-base">Documentacao</CardTitle>
+                      <CardDescription>
+                        Anexe a Nota Fiscal ou outros documentos (PDF)
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                       <input
+                        ref={pdfInputRef}
+                        type="file"
+                        accept="application/pdf"
+                        onChange={handlePdfChange}
+                        className="hidden"
+                      />
+                      
+                      {notaFiscalPdf ? (
+                        <div className="flex items-center justify-between p-3 border rounded-lg bg-muted/50">
+                            <div className="flex items-center gap-3">
+                                <div className="h-10 w-10 rounded-lg bg-red-100 flex items-center justify-center">
+                                    <FileText className="h-5 w-5 text-red-600" />
+                                </div>
+                                <div className="flex flex-col">
+                                    <span className="text-sm font-medium">Nota Fiscal.pdf</span>
+                                    <span className="text-xs text-muted-foreground">Anexado com sucesso</span>
+                                </div>
+                            </div>
+                            <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-destructive"
+                                onClick={() => setNotaFiscalPdf(null)}
+                            >
+                                <Trash2 className="h-4 w-4" />
+                            </Button>
+                        </div>
+                      ) : (
+                        <Button 
+                            variant="outline" 
+                            className="w-full gap-2 border-dashed h-12"
+                            onClick={() => pdfInputRef.current?.click()}
+                        >
+                            <FileText className="h-4 w-4 text-muted-foreground" />
+                            Anexar Nota Fiscal (PDF)
+                        </Button>
+                      )}
+                    </CardContent>
+                  </Card>
+
+                  <Card className={fieldErrors.includes("imagem") ? "border-destructive" : ""}>
+                    <CardHeader>
+                      <CardTitle className="text-base flex items-center gap-1">
+                        Imagem do Bem <span className="text-destructive">*</span>
+                      </CardTitle>
                       <CardDescription>
                         Envie uma foto do equipamento para identificacao visual
                       </CardDescription>
@@ -1537,10 +2260,10 @@ export function CadastroForm() {
                 {savedMessage}
               </div>
             )}
-            <Button variant="outline" className="bg-transparent">Cancelar</Button>
-            <Button onClick={handleSave} className="gap-2">
-              <Save className="h-4 w-4" />
-              Cadastrar Bem
+            <Button variant="outline" className="bg-transparent" disabled={isSubmitting}>Cancelar</Button>
+            <Button onClick={handleSave} className="gap-2" disabled={isSubmitting}>
+              {isSubmitting ? <Clock className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              {isSubmitting ? "Cadastrando..." : "Cadastrar Bem"}
             </Button>
           </div>
         </>

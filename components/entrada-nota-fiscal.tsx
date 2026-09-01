@@ -1,9 +1,10 @@
 "use client"
 
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import { GroupSelector } from "@/components/group-selector"
 import { useState, useCallback, useRef, useEffect } from "react"
 import useSWR, { mutate } from "swr"
-import { api, fetcher } from "@/lib/api-client"
+import { api, fetcher, getApiErrorMessage, isApiError } from "@/lib/api-client"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -61,13 +62,16 @@ import {
   ClipboardCopy,
   ImagePlus,
   ImageIcon,
+  Download,
 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import type { AssetCategory } from "@/lib/data"
 import { CategoriaSelector } from "@/components/categoria-selector"
 import { MarcaSelector } from "@/components/marca-selector"
+import { AssetSearchSelector } from "./asset-search-selector"
 import { PatrimonioTypeSelector, PatrimonioType } from "@/components/patrimonio-type-selector"
 import { ResponsavelSelect } from "@/components/responsavel-select"
+import { FornecedorSelector } from "@/components/fornecedor-selector"
 
 // Types for nota fiscal items
 interface NotaFiscalItem {
@@ -84,7 +88,10 @@ interface NotaFiscalItem {
   grupo: string
   marca: string
   modelo: string
+  tempoGarantia?: number
+  emendaParlamentar?: string
   imagem?: string | null
+  patrimonioInicial?: string
 }
 
 interface PatrimonioGerado {
@@ -96,6 +103,8 @@ interface PatrimonioGerado {
   grupo: string
   marca: string
   modelo: string
+  tempoGarantia?: number
+  emendaParlamentar?: string
   valorUnitario: number
   indice: number
   total: number
@@ -108,8 +117,79 @@ interface NfInfo {
   chaveAcesso: string
   dataEmissao: string
   fornecedor: string
-  cnpjFornecedor: string
+  documentoFornecedor: string
+  nomeFantasiaFornecedor?: string
+  enderecoFornecedor?: string
+  cidadeFornecedor?: string
+  estadoFornecedor?: string
+  telefoneFornecedor?: string
   valorTotal: number
+}
+
+interface Fornecedor {
+  id: string
+  nome: string
+  nome_fantasia?: string
+  razao_social?: string
+  cnpj?: string
+  cidade?: string
+  estado?: string
+  endereco?: string
+  telefone?: string
+}
+
+type FornecedorResolutionStatus =
+  | "idle"
+  | "resolving"
+  | "reused"
+  | "created"
+  | "manual_required"
+  | "manual_selected"
+  | "error"
+
+interface FornecedorResolution {
+  status: FornecedorResolutionStatus
+  nome: string
+  documento: string
+  fornecedorId?: string
+  source: "xml" | "manual"
+  message: string
+}
+
+type TipoEntradaBem =
+  | "compra"
+  | "aquisicao"
+  | "doacao"
+  | "transferencia"
+  | "comodato"
+  | "cessao"
+  | "permuta"
+  | "outro"
+
+interface NotaFiscalSystemSettings {
+  linkExtensaoXml?: string
+  linkPortalSefaz?: string
+}
+
+const tipoEntradaOptions: Array<{ value: TipoEntradaBem; label: string }> = [
+  { value: "compra", label: "Compra" },
+  { value: "aquisicao", label: "Aquisição" },
+  { value: "doacao", label: "Doação" },
+  { value: "transferencia", label: "Transferência" },
+  { value: "comodato", label: "Comodato" },
+  { value: "cessao", label: "Cessão" },
+  { value: "permuta", label: "Permuta" },
+  { value: "outro", label: "Outro" },
+]
+
+const parsePatrimonioSequence = (value: string) => {
+  const match = value.trim().match(/^(.*?)(\d+)$/)
+  if (!match) return null
+  return {
+    prefix: match[1],
+    nextNumber: parseInt(match[2], 10),
+    padding: match[2].length,
+  }
 }
 
 // XML NF-e parser
@@ -132,14 +212,28 @@ function parseNFeXml(xmlText: string): { info: NfInfo; itens: NotaFiscalItem[] }
     const ide = doc.getElementsByTagName("ide")[0]
     const emit = doc.getElementsByTagName("emit")[0]
     const total = doc.getElementsByTagName("ICMSTot")[0]
+    const enderEmit = emit?.getElementsByTagName("enderEmit")[0]
+
+    const supplierName = emit ? (getText(emit, "xFant") || getText(emit, "xNome")) : ""
+    const supplierDocument = emit ? (getText(emit, "CNPJ") || getText(emit, "CPF")) : ""
+    const supplierAddressParts = [
+      enderEmit ? getText(enderEmit, "xLgr") : "",
+      enderEmit ? getText(enderEmit, "nro") : "",
+      enderEmit ? getText(enderEmit, "xBairro") : "",
+    ].filter(Boolean)
 
     const info: NfInfo = {
       numero: ide ? getText(ide, "nNF") : "",
       serie: ide ? getText(ide, "serie") : "",
       chaveAcesso: "",
       dataEmissao: ide ? (getText(ide, "dhEmi") || getText(ide, "dEmi")) : "",
-      fornecedor: emit ? getText(emit, "xNome") : "",
-      cnpjFornecedor: emit ? (getText(emit, "CNPJ") || getText(emit, "CPF")) : "",
+      fornecedor: supplierName,
+      documentoFornecedor: supplierDocument,
+      nomeFantasiaFornecedor: emit ? getText(emit, "xFant") : "",
+      enderecoFornecedor: supplierAddressParts.join(", "),
+      cidadeFornecedor: enderEmit ? getText(enderEmit, "xMun") : "",
+      estadoFornecedor: enderEmit ? getText(enderEmit, "UF") : "",
+      telefoneFornecedor: emit ? (getText(emit, "fone") || (enderEmit ? getText(enderEmit, "fone") : "")) : "",
       valorTotal: total ? parseFloat(getText(total, "vNF")) || 0 : 0,
     }
 
@@ -178,6 +272,7 @@ function parseNFeXml(xmlText: string): { info: NfInfo; itens: NotaFiscalItem[] }
         grupo: "",
         marca: "",
         modelo: "",
+        emendaParlamentar: "",
         imagem: null,
       })
     }
@@ -269,9 +364,19 @@ function generateProvId(): string {
   return `PROV-${ano}-${seq}`
 }
 
-function formatCnpj(cnpj: string): string {
-  if (!cnpj || cnpj.length !== 14) return cnpj
-  return `${cnpj.slice(0, 2)}.${cnpj.slice(2, 5)}.${cnpj.slice(5, 8)}/${cnpj.slice(8, 12)}-${cnpj.slice(12)}`
+function normalizeDocument(value: string): string {
+  return value.replace(/\D/g, "")
+}
+
+function formatDocument(document: string): string {
+  const normalized = normalizeDocument(document)
+  if (normalized.length === 14) {
+    return `${normalized.slice(0, 2)}.${normalized.slice(2, 5)}.${normalized.slice(5, 8)}/${normalized.slice(8, 12)}-${normalized.slice(12)}`
+  }
+  if (normalized.length === 11) {
+    return `${normalized.slice(0, 3)}.${normalized.slice(3, 6)}.${normalized.slice(6, 9)}-${normalized.slice(9)}`
+  }
+  return document
 }
 
 // Demo XML content removed for production
@@ -280,8 +385,13 @@ function formatCnpj(cnpj: string): string {
 
 export function EntradaNotaFiscal() {
   const { toast } = useToast()
-  const { data: secretarias = [] } = useSWR<any[]>("/secretarias", fetcher)
+  const { data: systemSettings } = useSWR<NotaFiscalSystemSettings>("/configuracoes/sistema", fetcher)
+  const { data: secretariasData } = useSWR("/secretarias?all=true", fetcher)
+  const { data: fornecedoresData } = useSWR("/fornecedores?all=true", fetcher)
+  const secretarias = (Array.isArray(secretariasData) ? secretariasData : (secretariasData?.data || [])) as any[]
+  const fornecedores = (Array.isArray(fornecedoresData) ? fornecedoresData : (fornecedoresData?.data || [])) as Fornecedor[]
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const confirmSubmitLockRef = useRef(false)
   const [loading, setLoading] = useState(false)
   const [parseError, setParseError] = useState("")
   const [fileName, setFileName] = useState("")
@@ -320,20 +430,253 @@ export function EntradaNotaFiscal() {
   const [isCreatingSala, setIsCreatingSala] = useState(false)
   const [newSalaName, setNewSalaName] = useState("")
   const [patrimonioTipo, setPatrimonioTipo] = useState<PatrimonioType>("provisorio")
+  const [tipoEntrada, setTipoEntrada] = useState<TipoEntradaBem>("compra")
   const [patrimonioInicial, setPatrimonioInicial] = useState("")
   const [isManualProvisorio, setIsManualProvisorio] = useState(false)
   const [manualProvisorioStart, setManualProvisorioStart] = useState("")
   const [provAno, setProvAno] = useState(new Date().getFullYear().toString())
+  const [notaFiscalPdf, setNotaFiscalPdf] = useState<string | null>(null)
+  const [manualFornecedorSel, setManualFornecedorSel] = useState("")
+  const [fornecedorResolution, setFornecedorResolution] = useState<FornecedorResolution>({
+    status: "idle",
+    nome: "",
+    documento: "",
+    source: "xml",
+    message: "",
+  })
+  const pdfInputRef = useRef<HTMLInputElement>(null)
+  const [fieldErrors, setFieldErrors] = useState<string[]>([])
+  const [itemFieldErrors, setItemFieldErrors] = useState<string[]>([])
+  const [errorSummary, setErrorSummary] = useState<string[]>([])
+  const autoCreatedSupplierDocsRef = useRef<Set<string>>(new Set())
+  const supplierAttemptRef = useRef<string | null>(null)
+
+  const scrollToFirstError = () => {
+    window.setTimeout(() => {
+      const firstError = document.querySelector("[data-field-error='true']")
+      if (firstError) {
+        ;(firstError as HTMLElement).scrollIntoView({ behavior: "smooth", block: "center" })
+      }
+    }, 50)
+  }
+
+  const resolveSupplierDisplayName = useCallback((supplier?: Partial<Fornecedor> | null) => {
+    if (!supplier) return ""
+    return (
+      supplier.nome_fantasia?.trim() ||
+      supplier.nome?.trim() ||
+      supplier.razao_social?.trim() ||
+      ""
+    )
+  }, [])
+
+  const getResolvedFornecedorName = useCallback(() => {
+    if (fornecedorResolution.status === "manual_selected") {
+      return manualFornecedorSel.trim()
+    }
+    return fornecedorResolution.nome.trim() || notaInfo?.fornecedor?.trim() || ""
+  }, [fornecedorResolution.nome, fornecedorResolution.status, manualFornecedorSel, notaInfo?.fornecedor])
+
+  const getResolvedFornecedorDocument = useCallback(() => {
+    return fornecedorResolution.documento.trim() || notaInfo?.documentoFornecedor?.trim() || ""
+  }, [fornecedorResolution.documento, notaInfo?.documentoFornecedor])
+
+  useEffect(() => {
+    if (!notaInfo) {
+      setFornecedorResolution({
+        status: "idle",
+        nome: "",
+        documento: "",
+        source: "xml",
+        message: "",
+      })
+      setManualFornecedorSel("")
+      supplierAttemptRef.current = null
+      return
+    }
+
+    const supplierName = notaInfo.fornecedor?.trim() || ""
+    const normalizedDocument = normalizeDocument(notaInfo.documentoFornecedor || "")
+
+    if (!supplierName) {
+      setFornecedorResolution({
+        status: "manual_required",
+        nome: "",
+        documento: normalizedDocument,
+        source: "xml",
+        message: "O XML não trouxe um nome de fornecedor utilizável. Selecione ou cadastre manualmente.",
+      })
+      return
+    }
+
+    if (manualFornecedorSel.trim()) {
+      setFornecedorResolution({
+        status: "manual_selected",
+        nome: manualFornecedorSel.trim(),
+        documento: normalizedDocument,
+        source: "manual",
+        message: "Fornecedor definido manualmente para esta nota fiscal.",
+      })
+      return
+    }
+
+    if (!normalizedDocument) {
+      setFornecedorResolution({
+        status: "manual_required",
+        nome: supplierName,
+        documento: "",
+        source: "xml",
+        message: "O XML não trouxe um documento válido do fornecedor. Selecione ou cadastre manualmente antes de confirmar.",
+      })
+      return
+    }
+
+    const existingSupplier = fornecedores.find((supplier) => normalizeDocument(supplier.cnpj || "") === normalizedDocument)
+    if (existingSupplier) {
+      const supplierLabel = resolveSupplierDisplayName(existingSupplier) || supplierName
+      setFornecedorResolution({
+        status: autoCreatedSupplierDocsRef.current.has(normalizedDocument) ? "created" : "reused",
+        nome: supplierLabel,
+        documento: normalizedDocument,
+        fornecedorId: existingSupplier.id,
+        source: "xml",
+        message: autoCreatedSupplierDocsRef.current.has(normalizedDocument)
+          ? "Fornecedor cadastrado automaticamente a partir do XML e vinculado a esta nota."
+          : "Fornecedor já cadastrado no sistema e reaproveitado automaticamente.",
+      })
+      return
+    }
+
+    if (supplierAttemptRef.current === normalizedDocument) {
+      return
+    }
+
+    supplierAttemptRef.current = normalizedDocument
+    setFornecedorResolution({
+      status: "resolving",
+      nome: supplierName,
+      documento: normalizedDocument,
+      source: "xml",
+      message: "Analisando o fornecedor do XML e verificando cadastro existente...",
+    })
+
+    let cancelled = false
+
+    ;(async () => {
+      try {
+        const created = await api.createFornecedor({
+          nome: notaInfo.nomeFantasiaFornecedor?.trim() || supplierName,
+          nome_fantasia: notaInfo.nomeFantasiaFornecedor?.trim() || supplierName,
+          razao_social: supplierName,
+          cnpj: normalizedDocument,
+          cidade: notaInfo.cidadeFornecedor?.trim() || undefined,
+          estado: notaInfo.estadoFornecedor?.trim() || undefined,
+          endereco: notaInfo.enderecoFornecedor?.trim() || undefined,
+          telefone: notaInfo.telefoneFornecedor?.trim() || undefined,
+        })
+
+        if (cancelled) return
+
+        autoCreatedSupplierDocsRef.current.add(normalizedDocument)
+        await mutate("/fornecedores?all=true")
+        setFornecedorResolution({
+          status: "created",
+          nome: String(created?.nome || notaInfo.nomeFantasiaFornecedor || supplierName),
+          documento: normalizedDocument,
+          fornecedorId: created?.id ? String(created.id) : undefined,
+          source: "xml",
+          message: "Fornecedor não existia no sistema e foi cadastrado automaticamente com os dados do XML.",
+        })
+      } catch (error) {
+        if (cancelled) return
+
+        if (isApiError(error) && error.status === 409) {
+          const existingName =
+            error.body?.existingSupplier?.nome?.toString().trim() ||
+            notaInfo?.fornecedor?.trim()
+          await mutate("/fornecedores?all=true")
+          setFornecedorResolution({
+            status: "reused",
+            nome: existingName || supplierName,
+            documento: normalizedDocument,
+            fornecedorId: error.body?.existingSupplier?.id ? String(error.body.existingSupplier.id) : undefined,
+            source: "xml",
+            message: "Fornecedor já existia no sistema e foi reaproveitado automaticamente pelo documento.",
+          })
+          return
+        }
+
+        const fallbackMessage = normalizedDocument
+          ? "Não foi possível resolver automaticamente o fornecedor do XML. Selecione ou cadastre manualmente para continuar."
+          : "O fornecedor do XML não possui documento suficiente para cadastro automático."
+
+        setFornecedorResolution({
+          status: normalizedDocument ? "error" : "manual_required",
+          nome: supplierName,
+          documento: normalizedDocument,
+          source: "xml",
+          message: getApiErrorMessage(error, fallbackMessage),
+        })
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    fornecedores,
+    manualFornecedorSel,
+    notaInfo,
+    resolveSupplierDisplayName,
+  ])
+
+  const validateCodeAvailability = async (
+    codes: Array<{ code: string; field?: "patrimonio" | "patrimonioProvisorio"; itemIndex?: number }>,
+    contextLabel: string
+  ) => {
+    if (codes.length === 0) return true
+
+    const result = await api.validateBemCodes(codes)
+    if (result.available) return true
+
+    const firstConflict = result.conflicts?.[0]
+    const code = firstConflict?.conflictingCode || firstConflict?.code
+    const itemLabel =
+      typeof firstConflict?.itemIndex === "number" && codes.length > 1
+        ? ` no item ${Number(firstConflict.itemIndex) + 1}`
+        : ""
+    const message = code
+      ? `O patrimônio ${code} já está em uso${itemLabel}. Ajuste a numeração antes de continuar.`
+      : `${contextLabel} contém um patrimônio já utilizado.`
+
+    setErrorSummary([message])
+    toast({
+      title: "Patrimônio já em uso",
+      description: message,
+      variant: "destructive",
+      duration: 8000,
+    })
+
+    return false
+  }
+
+  const getDefinitivePrefix = (dateValue?: string | null) => {
+    if (!dateValue) return `PAT-${new Date().getFullYear()}-`
+    const parsed = new Date(dateValue)
+    const year = Number.isNaN(parsed.getTime()) ? new Date().getFullYear() : parsed.getFullYear()
+    return `PAT-${year}-`
+  }
+
+  const getAutomaticDefinitiveStart = async (prefix?: string) => {
+    const effectivePrefix = prefix || getDefinitivePrefix(notaInfo?.dataEmissao || "")
+    const res = await api.get(`/bens/next-number?prefix=${encodeURIComponent(effectivePrefix)}`)
+    const nextNumber = Number(res?.nextNumber || 1)
+    return `${effectivePrefix}${String(nextNumber).padStart(5, "0")}`
+  }
 
   useEffect(() => {
     if (patrimonioTipo === "definitivo") {
-      api.get('/bens/next-number').then((res) => {
-        if (res && res.nextNumber) {
-          const year = new Date().getFullYear();
-          const num = String(res.nextNumber).padStart(5, '0');
-          setPatrimonioInicial(`PAT-${year}-${num}`)
-        }
-      }).catch(err => console.error("Error fetching next number:", err))
+      setPatrimonioInicial("")
     }
   }, [patrimonioTipo])
 
@@ -341,6 +684,25 @@ export function EntradaNotaFiscal() {
   const selectedDepartamento = selectedSecretaria?.departamentos.find(
     (d: any) => d.nome === departamentoSel
   )
+
+  const supplierStatusBadge = (() => {
+    switch (fornecedorResolution.status) {
+      case "reused":
+        return <Badge className="bg-success text-success-foreground">Fornecedor encontrado no sistema</Badge>
+      case "created":
+        return <Badge className="bg-primary text-primary-foreground">Fornecedor cadastrado automaticamente</Badge>
+      case "manual_selected":
+        return <Badge variant="secondary">Fornecedor definido manualmente</Badge>
+      case "manual_required":
+        return <Badge variant="outline" className="border-warning/60 text-warning">Ação manual necessária</Badge>
+      case "error":
+        return <Badge variant="destructive">Erro ao resolver fornecedor</Badge>
+      case "resolving":
+        return <Badge variant="secondary" className="gap-1"><Loader2 className="h-3 w-3 animate-spin" /> Resolvendo fornecedor</Badge>
+      default:
+        return null
+    }
+  })()
 
   const handleCreateDept = async () => {
     if (!newDeptName.trim() || !selectedSecretaria) return
@@ -352,7 +714,7 @@ export function EntradaNotaFiscal() {
         toast({ title: "Sucesso", description: "Departamento criado!" })
         setNewDeptName("")
         setIsCreatingDept(false)
-        mutate("/secretarias")
+        mutate("/secretarias?all=true")
       }
     } catch (e) {
       toast({ title: "Erro", description: "Erro ao criar departamento", variant: "destructive" })
@@ -369,7 +731,7 @@ export function EntradaNotaFiscal() {
         toast({ title: "Sucesso", description: "Sala criada!" })
         setNewSalaName("")
         setIsCreatingSala(false)
-        mutate("/secretarias")
+        mutate("/secretarias?all=true")
       }
     } catch (e) {
       toast({ title: "Erro", description: "Erro ao criar sala", variant: "destructive" })
@@ -477,6 +839,33 @@ export function EntradaNotaFiscal() {
         return updated
       })
     )
+    const itemFieldKey = `item-${itemId}-${field}`
+    if (itemFieldErrors.includes(itemFieldKey)) {
+      setItemFieldErrors((prev) => prev.filter((error) => error !== itemFieldKey))
+    }
+  }
+
+  const handleUpdateItemFromAsset = (itemId: string, asset: any) => {
+    setItens((prev) =>
+      prev.map((item) => {
+        if (item.id !== itemId) return item
+        return {
+             ...item,
+             descricaoEditada: asset.descricao || item.descricaoEditada,
+             categoria: asset.categoria || item.categoria,
+             grupo: asset.grupo || item.grupo,
+             marca: asset.marca || item.marca,
+             modelo: asset.modelo || item.modelo,
+             tempoGarantia: asset.tempoGarantia ? parseInt(asset.tempoGarantia) : item.tempoGarantia,
+             emendaParlamentar: asset.emendaParlamentar || item.emendaParlamentar,
+             imagem: asset.imagem || item.imagem
+        }
+      })
+    )
+    toast({
+        title: "Dados aplicados",
+        description: "Os dados do bem selecionado foram aplicados a este item.",
+    })
   }
 
   const handleItemImageChange = (itemId: string, e: React.ChangeEvent<HTMLInputElement>) => {
@@ -492,6 +881,10 @@ export function EntradaNotaFiscal() {
           return { ...item, imagem: result }
         })
       )
+      const itemFieldKey = `item-${itemId}-imagem`
+      if (itemFieldErrors.includes(itemFieldKey)) {
+        setItemFieldErrors((prev) => prev.filter((error) => error !== itemFieldKey))
+      }
     }
     reader.readAsDataURL(file)
     e.target.value = ""
@@ -527,83 +920,132 @@ export function EntradaNotaFiscal() {
         grupo: "",
         marca: "",
         modelo: "",
+        tempoGarantia: undefined,
+        emendaParlamentar: "",
         imagem: null,
+        patrimonioInicial: "",
       },
     ])
   }
 
   const handleGerarPatrimonios = async () => {
-    // Validate items
-    const missingCategory = itens.find(i => !i.categoria)
-    if (missingCategory) {
+    const newFieldErrors: string[] = []
+    const newItemFieldErrors: string[] = []
+    const summaryErrors: string[] = []
+
+    if (!secretariaSel) { newFieldErrors.push("secretaria"); summaryErrors.push("Secretaria") }
+    if (!departamentoSel) { newFieldErrors.push("departamento"); summaryErrors.push("Departamento") }
+    if (!salaSel) { newFieldErrors.push("sala"); summaryErrors.push("Sala") }
+    if (!responsavel) { newFieldErrors.push("responsavel"); summaryErrors.push("Responsavel") }
+    if (!cargoResponsavel) { newFieldErrors.push("cargoResponsavel"); summaryErrors.push("Cargo do responsavel") }
+
+    itens.forEach((item, index) => {
+      const missingItemParts: string[] = []
+      if (!item.categoria) { newItemFieldErrors.push(`item-${item.id}-categoria`); missingItemParts.push("categoria") }
+      if (!item.grupo) { newItemFieldErrors.push(`item-${item.id}-grupo`); missingItemParts.push("grupo") }
+      if (!item.imagem) { newItemFieldErrors.push(`item-${item.id}-imagem`); missingItemParts.push("imagem") }
+      if (missingItemParts.length > 0) {
+        summaryErrors.push(`Item ${index + 1}: ${missingItemParts.join(", ")}`)
+      }
+    })
+
+    setFieldErrors(newFieldErrors)
+    setItemFieldErrors(newItemFieldErrors)
+    setErrorSummary(summaryErrors)
+
+    if (summaryErrors.length > 0) {
+      scrollToFirstError()
       toast({
-        title: "Dados incompletos",
-        description: `O item "${missingCategory.descricaoEditada || missingCategory.descricaoOriginal}" está sem categoria. Selecione uma categoria para todos os itens.`,
+        title: "Pendencias encontradas",
+        description: "Corrija os campos destacados antes de gerar os patrimonios.",
         variant: "destructive"
       })
       return
     }
 
+    setFieldErrors([])
+    setItemFieldErrors([])
+    setErrorSummary([])
     let currentPatNumber = 0
     let currentPatPrefix = ""
     let currentPatPadding = 0
 
     if (patrimonioTipo === "definitivo") {
-        if (!patrimonioInicial) {
-             toast({ title: "Erro", description: "Informe o numero de patrimonio inicial.", variant: "destructive" })
-             return
-        }
-        const match = patrimonioInicial.match(/^(.*?)(\d+)$/)
-        if (match) {
-            currentPatPrefix = match[1]
-            currentPatNumber = parseInt(match[2])
-            currentPatPadding = match[2].length
-        } else {
-             toast({ title: "Erro", description: "Formato de patrimonio invalido. Use algo como PAT-001", variant: "destructive" })
-             return
-        }
+      let patrimonioInicialEfetivo = patrimonioInicial.trim()
+      if (!patrimonioInicialEfetivo) {
+        patrimonioInicialEfetivo = await getAutomaticDefinitiveStart(getDefinitivePrefix(notaInfo?.dataEmissao || ""))
+      }
+
+      const match = patrimonioInicialEfetivo.match(/^(.*?)(\d+)$/)
+      if (match) {
+        currentPatPrefix = match[1]
+        currentPatNumber = parseInt(match[2])
+        currentPatPadding = match[2].length
+      } else {
+        toast({ title: "Erro", description: "Formato de patrimonio invalido. Use algo como PAT-001", variant: "destructive" })
+        return
+      }
+    } else if (isManualProvisorio) {
+      if (!manualProvisorioStart) {
+        toast({ title: "Erro", description: "Informe o numero provisorio inicial.", variant: "destructive" })
+        return
+      }
+      currentPatNumber = parseInt(manualProvisorioStart)
+      if (isNaN(currentPatNumber)) {
+        toast({ title: "Erro", description: "Numero provisorio invalido.", variant: "destructive" })
+        return
+      }
+      currentPatPadding = manualProvisorioStart.length
     } else {
-        if (isManualProvisorio) {
-            if (!manualProvisorioStart) {
-                toast({ title: "Erro", description: "Informe o numero provisorio inicial.", variant: "destructive" })
-                return
-            }
-            currentPatNumber = parseInt(manualProvisorioStart)
-            if (isNaN(currentPatNumber)) {
-                toast({ title: "Erro", description: "Numero provisorio invalido.", variant: "destructive" })
-                return
-            }
-            currentPatPadding = manualProvisorioStart.length
-        } else {
-            // Auto provisional - Fetch latest sequence
-            try {
-                const res = await api.get('/bens?limit=1');
-                if (res && res.meta && res.meta.nextProvisionalSeq) {
-                    currentPatNumber = res.meta.nextProvisionalSeq;
-                } else {
-                    currentPatNumber = 1;
-                }
-            } catch (e) {
-                console.error("Erro ao buscar sequencia provisoria:", e);
-                currentPatNumber = 1;
-            }
-            currentPatPadding = 5
-        }
+      try {
+        const res = await api.get('/bens?limit=1')
+        currentPatNumber = res?.meta?.nextProvisionalSeq || 1
+      } catch (e) {
+        console.error("Erro ao buscar sequencia provisoria:", e)
+        currentPatNumber = 1
+      }
+      currentPatPadding = 5
     }
 
     const patrimonios: PatrimonioGerado[] = []
-    for (const item of itens) {
+    const generatedCodes = new Map<string, number>()
+    for (let itemIndex = 0; itemIndex < itens.length; itemIndex++) {
+      const item = itens[itemIndex]
+      if (patrimonioTipo === "definitivo" && item.patrimonioInicial) {
+        const match = item.patrimonioInicial.match(/^(.*?)(\d+)$/)
+        if (match) {
+          currentPatPrefix = match[1]
+          currentPatNumber = parseInt(match[2])
+          currentPatPadding = match[2].length
+        }
+      }
+
       for (let i = 0; i < item.quantidade; i++) {
         let numeroPat = ""
         if (patrimonioTipo === "definitivo") {
-            const numStr = String(currentPatNumber).padStart(currentPatPadding, '0')
-            numeroPat = `${currentPatPrefix}${numStr}`
-            currentPatNumber++
+          const numStr = String(currentPatNumber).padStart(currentPatPadding, '0')
+          numeroPat = `${currentPatPrefix}${numStr}`
+          currentPatNumber++
         } else {
-            const numStr = String(currentPatNumber).padStart(currentPatPadding, '0')
-            numeroPat = `PROV-${provAno}-${numStr}`
-            currentPatNumber++
+          const numStr = String(currentPatNumber).padStart(currentPatPadding, '0')
+          numeroPat = `PROV-${provAno}-${numStr}`
+          currentPatNumber++
         }
+
+        const normalizedCode = numeroPat.trim().toUpperCase()
+        const previousItemIndex = generatedCodes.get(normalizedCode)
+        if (typeof previousItemIndex === "number") {
+          const conflictMessage = `O patrimônio ${numeroPat} foi gerado mais de uma vez entre os itens ${previousItemIndex + 1} e ${itemIndex + 1}. Ajuste os números iniciais antes de confirmar.`
+          setErrorSummary([conflictMessage])
+          toast({
+            title: "Patrimônio duplicado na nota fiscal",
+            description: conflictMessage,
+            variant: "destructive",
+            duration: 8000,
+          })
+          return
+        }
+        generatedCodes.set(normalizedCode, itemIndex)
 
         patrimonios.push({
           id: `pat-${item.id}-${i}`,
@@ -614,6 +1056,8 @@ export function EntradaNotaFiscal() {
           grupo: item.grupo,
           marca: item.marca,
           modelo: item.modelo,
+          tempoGarantia: item.tempoGarantia,
+          emendaParlamentar: item.emendaParlamentar,
           valorUnitario: item.valorUnitario,
           indice: i + 1,
           total: item.quantidade,
@@ -621,20 +1065,57 @@ export function EntradaNotaFiscal() {
         })
       }
     }
+
+    const explicitCodes = patrimonios.map((pat, index) => ({
+      code: pat.numero,
+      field: patrimonioTipo === "definitivo" ? "patrimonio" as const : "patrimonioProvisorio" as const,
+      itemIndex: index,
+    }))
+
+    const canContinue = await validateCodeAvailability(explicitCodes, "A numeração informada para a nota fiscal")
+    if (!canContinue) {
+      return
+    }
+
     setPatrimoniosGerados(patrimonios)
     setStep("confirmacao")
   }
 
+  const handlePdfChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (file.type !== "application/pdf") {
+      toast({
+        title: "Arquivo inválido",
+        description: "Por favor, selecione um arquivo PDF.",
+        variant: "destructive",
+      })
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      setNotaFiscalPdf(ev.target?.result as string)
+      toast({
+          title: "Sucesso",
+          description: "PDF da Nota Fiscal anexado com sucesso!",
+      })
+    }
+    reader.readAsDataURL(file)
+    e.target.value = ""
+  }
+
   const handleConfirmarEntrada = async () => {
-    // Validation
+    if (confirmSubmitLockRef.current) return
     const missingFields: string[] = []
-    
+
     if (!secretariaSel) missingFields.push("Secretaria")
     if (!departamentoSel) missingFields.push("Departamento")
     if (!salaSel) missingFields.push("Sala")
-    if (!responsavel) missingFields.push("Responsável")
-    
+    if (!responsavel) missingFields.push("Responsavel")
+
     if (missingFields.length > 0) {
+      setErrorSummary(missingFields)
+      scrollToFirstError()
       toast({
         title: "Campos Obrigatórios Faltando",
         description: `Por favor, preencha os seguintes campos: ${missingFields.join(", ")}.`,
@@ -644,22 +1125,39 @@ export function EntradaNotaFiscal() {
       return
     }
 
+    const resolvedFornecedor = getResolvedFornecedorName()
+    if (!resolvedFornecedor) {
+      const supplierMessage =
+        fornecedorResolution.status === "manual_required"
+          ? "O fornecedor da nota não pôde ser resolvido automaticamente. Selecione ou cadastre manualmente antes de confirmar."
+          : fornecedorResolution.status === "error"
+            ? "Houve um erro ao resolver o fornecedor da nota. Corrija manualmente antes de confirmar."
+            : "A resolução do fornecedor ainda não foi concluída."
+      setErrorSummary([supplierMessage])
+      toast({
+        title: "Fornecedor pendente",
+        description: supplierMessage,
+        variant: "destructive",
+        duration: 6000,
+      })
+      return
+    }
+
+    if (fornecedorResolution.status === "resolving") {
+      toast({
+        title: "Aguarde a resolução do fornecedor",
+        description: "O sistema ainda está validando o fornecedor importado pelo XML.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    confirmSubmitLockRef.current = true
     setLoading(true)
     try {
-      // Auto-create supplier if needed and not exists
-      if (notaInfo?.fornecedor && notaInfo?.cnpjFornecedor) {
-         try {
-            await api.createFornecedor({
-                nome: notaInfo.fornecedor,
-                cnpj: notaInfo.cnpjFornecedor
-            });
-         } catch (e) {
-             console.log("Fornecedor ja existe ou erro ao criar automatico:", e);
-         }
-      }
-
-      // Create assets one by one
-      const promises = patrimoniosGerados.map((pat) => {
+      const payloads = patrimoniosGerados.map((pat) => {
+        const itemOrigem = itens.find((item) => item.id === pat.itemId)
+        const itemTemInicioManual = Boolean(itemOrigem?.patrimonioInicial?.trim())
         const payload: any = {
           descricao: pat.descricao,
           categoria: pat.categoria || "outros",
@@ -667,6 +1165,8 @@ export function EntradaNotaFiscal() {
           marca: pat.marca,
           modelo: pat.modelo,
           valor: pat.valorUnitario,
+          tempoGarantia: pat.tempoGarantia,
+          emendaParlamentar: pat.emendaParlamentar,
           localizacao: {
             secretaria: secretariaSel,
             departamento: departamentoSel,
@@ -676,25 +1176,32 @@ export function EntradaNotaFiscal() {
             nome: responsavel,
             cargo: cargoResponsavel
           },
-          data_aquisicao: notaInfo?.dataEmissao ? new Date(notaInfo.dataEmissao).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
+          dataAquisicao: notaInfo?.dataEmissao ? new Date(notaInfo.dataEmissao).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
           estadoConservacao: "novo",
           status: "ativo",
-          observacoes: `Importado via NF ${notaInfo?.numero} - Fornecedor: ${notaInfo?.fornecedor}`,
+          observacoes: `Importado via NF ${notaInfo?.numero} - Fornecedor: ${resolvedFornecedor}`,
           patrimonioTipo: patrimonioTipo,
           imagem: pat.imagem,
-          fornecedor: notaInfo?.fornecedor || "Não Informado",
+          fornecedor: resolvedFornecedor,
+          notaFiscal: notaFiscalPdf,
+          tipoEntrada,
         }
-        
+
         if (patrimonioTipo === "definitivo") {
+          if (itemTemInicioManual || patrimonioInicial.trim()) {
             payload.patrimonio = pat.numero
+          }
+        } else if (isManualProvisorio) {
+          payload.patrimonioProvisorio = pat.numero
         } else {
-            payload.patrimonioProvisorio = pat.numero
+          payload.patrimonioProvisorio = `PROV-${provAno}-AUTO`
+          payload.patrimonioAutoGerado = true
         }
-        
-        return api.createBem(payload)
+
+        return payload
       })
-      
-      await Promise.all(promises)
+
+      await api.createBem(payloads)
 
       toast({
         title: "Sucesso",
@@ -702,15 +1209,23 @@ export function EntradaNotaFiscal() {
       })
       setShowConfirmDialog(false)
       setStep("concluido")
+      setErrorSummary([])
     } catch (error) {
       console.error(error)
+      const message = isApiError(error) && error.status === 409
+        ? (error.body?.conflictingCode
+            ? `O patrimônio ${error.body.conflictingCode} já está em uso${typeof error.body?.itemIndex === "number" ? ` no item ${error.body.itemIndex + 1}` : ""}. Ajuste a numeração e tente novamente.`
+            : getApiErrorMessage(error, "Erro ao salvar os bens."))
+        : getApiErrorMessage(error, "Erro ao salvar os bens. Tente novamente.")
+      setErrorSummary([message])
       toast({
         variant: "destructive",
-        title: "Erro",
-        description: "Erro ao salvar os bens. Tente novamente."
+        title: isApiError(error) && error.status === 409 ? "Patrimônio já existe" : "Erro",
+        description: message
       })
     } finally {
       setLoading(false)
+      confirmSubmitLockRef.current = false
     }
   }
 
@@ -736,10 +1251,10 @@ export function EntradaNotaFiscal() {
   const handleCopyAndOpenSefaz = useCallback(async () => {
     await handleCopyChave()
     window.open(
-      "https://www.fsist.com.br/",
+      systemSettings?.linkPortalSefaz || "https://www.fsist.com.br/",
       "_blank"
     )
-  }, [handleCopyChave])
+  }, [handleCopyChave, systemSettings?.linkPortalSefaz])
 
   const handleNovaEntrada = () => {
     setFileName("")
@@ -754,6 +1269,18 @@ export function EntradaNotaFiscal() {
     setResponsavel("")
     setCargoResponsavel("")
     setExpandedItem(null)
+    setNotaFiscalPdf(null)
+    setManualFornecedorSel("")
+    setTipoEntrada("compra")
+    setFornecedorResolution({
+      status: "idle",
+      nome: "",
+      documento: "",
+      source: "xml",
+      message: "",
+    })
+    supplierAttemptRef.current = null
+    autoCreatedSupplierDocsRef.current.clear()
   }
 
   // ========================
@@ -762,6 +1289,16 @@ export function EntradaNotaFiscal() {
   if (step === "upload") {
     return (
       <div className="flex flex-col gap-6">
+        <div className="flex justify-end">
+          <Button 
+            variant="outline" 
+            className="gap-2" 
+            onClick={() => window.open(systemSettings?.linkExtensaoXml || "https://chromewebstore.google.com/detail/fsist-download-xml-nfe/jclbljmbidghoecicnjofjldjndabajp", "_blank")}
+          >
+            <Download className="h-4 w-4" />
+            Baixar Extensão para Download de XML
+          </Button>
+        </div>
         <Card className="border-2 border-primary/20">
           <CardHeader className="pb-3">
             <div className="flex items-center gap-2">
@@ -1030,10 +1567,10 @@ export function EntradaNotaFiscal() {
               <span>
                 <span className="font-medium text-foreground">Fornecedor:</span> {notaInfo?.fornecedor}
               </span>
-              {notaInfo?.cnpjFornecedor && (
+              {notaInfo?.documentoFornecedor && (
                 <span>
-                  <span className="font-medium text-foreground">CNPJ:</span>{" "}
-                  {formatCnpj(notaInfo.cnpjFornecedor)}
+                  <span className="font-medium text-foreground">Documento:</span>{" "}
+                  {formatDocument(notaInfo.documentoFornecedor)}
                 </span>
               )}
               {notaInfo?.dataEmissao && (
@@ -1051,6 +1588,62 @@ export function EntradaNotaFiscal() {
                 </span>
               )}
             </div>
+          </CardContent>
+        </Card>
+
+        <Card className={fornecedorResolution.status === "error" ? "border-destructive/40 bg-destructive/5" : "border-primary/20"}>
+          <CardHeader className="pb-3">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <CardTitle className="text-base">Fornecedor da Nota Fiscal</CardTitle>
+                <CardDescription>
+                  O sistema tenta reaproveitar ou cadastrar automaticamente o fornecedor usando o documento do emitente.
+                </CardDescription>
+              </div>
+              {supplierStatusBadge}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-lg border bg-background/60 p-3">
+                <p className="text-xs text-muted-foreground">Nome do XML</p>
+                <p className="text-sm font-medium">{notaInfo?.fornecedor || "Não informado"}</p>
+              </div>
+              <div className="rounded-lg border bg-background/60 p-3">
+                <p className="text-xs text-muted-foreground">Documento</p>
+                <p className="text-sm font-medium">
+                  {getResolvedFornecedorDocument() ? formatDocument(getResolvedFornecedorDocument()) : "Não identificado"}
+                </p>
+              </div>
+              <div className="rounded-lg border bg-background/60 p-3 sm:col-span-2">
+                <p className="text-xs text-muted-foreground">Fornecedor que será usado</p>
+                <p className="text-sm font-medium">{getResolvedFornecedorName() || "Pendente de definição"}</p>
+              </div>
+            </div>
+
+            <div className="rounded-lg border bg-background/60 p-3">
+              <p className="text-xs text-muted-foreground">Status</p>
+              <p className="text-sm">{fornecedorResolution.message || "Aguardando dados do XML."}</p>
+            </div>
+
+            {(fornecedorResolution.status === "manual_required" || fornecedorResolution.status === "error") && (
+              <div className="grid gap-3 rounded-lg border border-warning/30 bg-warning/5 p-4">
+                <div>
+                  <p className="text-sm font-medium">Selecionar ou cadastrar fornecedor manualmente</p>
+                  <p className="text-xs text-muted-foreground">
+                    Use o cadastro já existente do sistema ou crie o fornecedor manualmente antes de concluir a entrada.
+                  </p>
+                </div>
+                <div className="max-w-xl">
+                  <FornecedorSelector
+                    value={manualFornecedorSel}
+                    onValueChange={setManualFornecedorSel}
+                    placeholder="Selecione ou crie um fornecedor"
+                    className="w-full"
+                  />
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -1072,18 +1665,38 @@ export function EntradaNotaFiscal() {
                 </CardHeader>
                 <CardContent>
                     <div className="flex flex-col gap-2 max-w-xs">
-                        <Label required>Patrimonio Inicial</Label>
+                        <Label>Patrimonio Inicial (Opcional)</Label>
                         <Input 
-                            placeholder="Ex: PAT-2025-0001" 
+                            placeholder="Ex: PAT-2026-00001" 
                             value={patrimonioInicial}
                             onChange={(e) => setPatrimonioInicial(e.target.value)}
                         />
                         <p className="text-xs text-muted-foreground">
-                            A sequencia sera gerada a partir deste numero para todos os {totalItens} itens.
+                            Se deixar em branco, o sistema gera automaticamente a sequencia definitiva para os {totalItens} itens.
                         </p>
                     </div>
                 </CardContent>
             </Card>
+        )}
+
+        {errorSummary.length > 0 && (
+          <Card className="border-destructive/40 bg-destructive/5" data-field-error="true">
+            <CardContent className="pt-6">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-medium text-destructive">
+                    {errorSummary.length} pendencia(s) impedem a continuaÃ§Ã£o
+                  </p>
+                  <ul className="mt-1 list-disc pl-4 text-xs text-destructive/90">
+                    {errorSummary.slice(0, 6).map((item, index) => (
+                      <li key={`${item}-${index}`}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
         )}
 
         {/* Location shared for all items */}
@@ -1098,49 +1711,60 @@ export function EntradaNotaFiscal() {
           <CardContent>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
               <div className="flex flex-col gap-2">
-                <Label htmlFor="sec-lote" required>Secretaria</Label>
-                <Select
-                  value={secretariaSel}
-                  onValueChange={(v) => {
-                    setSecretariaSel(v)
-                    setDepartamentoSel("")
-                    setSalaSel("")
-                  }}
-                >
-                  <SelectTrigger id="sec-lote">
-                    <SelectValue placeholder="Selecione" />
+                <Label htmlFor="tipo-entrada-nf">Tipo de Entrada</Label>
+                <Select value={tipoEntrada} onValueChange={(value: TipoEntradaBem) => setTipoEntrada(value)}>
+                  <SelectTrigger id="tipo-entrada-nf">
+                    <SelectValue placeholder="Selecione o tipo de entrada" />
                   </SelectTrigger>
                   <SelectContent>
-                    {secretarias.map((s) => (
-                      <SelectItem key={s.nome} value={s.nome}>
-                        {s.nome}
+                    {tipoEntradaOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
               <div className="flex flex-col gap-2">
-                <Label htmlFor="dep-lote" required>Departamento</Label>
+                <Label htmlFor="sec-lote" required className={fieldErrors.includes("secretaria") ? "text-destructive" : ""}>Secretaria</Label>
+                <SearchableSelect
+                  value={secretariaSel}
+                  onValueChange={(v) => {
+                    setSecretariaSel(v)
+                    setDepartamentoSel("")
+                    setSalaSel("")
+                    if (fieldErrors.includes("secretaria")) setFieldErrors(prev => prev.filter(e => e !== "secretaria"))
+                  }}
+                  placeholder="Selecione"
+                  searchPlaceholder="Buscar secretaria..."
+                  className={fieldErrors.includes("secretaria") ? "border-destructive ring-offset-destructive" : ""}
+                  items={secretarias.map((s) => ({
+                    value: s.nome,
+                    label: s.nome,
+                  }))}
+                />
+              </div>
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="dep-lote" required className={fieldErrors.includes("departamento") ? "text-destructive" : ""}>Departamento</Label>
                 <div className="flex gap-2">
-                  <Select
-                    value={departamentoSel}
-                    onValueChange={(v) => {
-                      setDepartamentoSel(v)
-                      setSalaSel("")
-                    }}
-                    disabled={!secretariaSel}
-                  >
-                    <SelectTrigger id="dep-lote" className="w-full">
-                      <SelectValue placeholder="Selecione" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {selectedSecretaria?.departamentos.map((d: any) => (
-                        <SelectItem key={d.nome} value={d.nome}>
-                          {d.nome}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <div className="w-full">
+                    <SearchableSelect
+                      value={departamentoSel}
+                      onValueChange={(v) => {
+                        setDepartamentoSel(v)
+                        setSalaSel("")
+                        if (fieldErrors.includes("departamento")) setFieldErrors(prev => prev.filter(e => e !== "departamento"))
+                      }}
+                      disabled={!secretariaSel}
+                      placeholder="Selecione o departamento"
+                      searchPlaceholder="Buscar departamento..."
+                      className={fieldErrors.includes("departamento") ? "border-destructive ring-offset-destructive" : ""}
+                      items={selectedSecretaria?.departamentos.map((d: any) => ({
+                        value: d.nome,
+                        label: d.nome,
+                      })) || []}
+                    />
+                  </div>
                   <Dialog open={isCreatingDept} onOpenChange={setIsCreatingDept}>
                     <DialogTrigger asChild>
                       <Button variant="outline" size="icon" disabled={!secretariaSel} title="Criar Departamento">
@@ -1164,24 +1788,28 @@ export function EntradaNotaFiscal() {
                 </div>
               </div>
               <div className="flex flex-col gap-2">
-                <Label htmlFor="sala-lote" required>Sala</Label>
+                <Label htmlFor="sala-lote" required className={fieldErrors.includes("sala") ? "text-destructive" : ""}>Sala</Label>
                 <div className="flex gap-2">
-                  <Select value={salaSel} onValueChange={setSalaSel} disabled={!departamentoSel}>
-                    <SelectTrigger id="sala-lote" className="w-full">
-                      <SelectValue placeholder="Selecione" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {selectedDepartamento?.salas.map((s: any) => {
+                  <div className="w-full">
+                    <SearchableSelect
+                      value={salaSel}
+                      onValueChange={(v) => {
+                          setSalaSel(v)
+                          if (fieldErrors.includes("sala")) setFieldErrors(prev => prev.filter(e => e !== "sala"))
+                      }}
+                      disabled={!departamentoSel}
+                      placeholder="Selecione a sala"
+                      searchPlaceholder="Buscar sala..."
+                      className={fieldErrors.includes("sala") ? "border-destructive ring-offset-destructive" : ""}
+                      items={selectedDepartamento?.salas.map((s: any) => {
                         const salaNome = typeof s === 'object' ? s.nome : s
-                        const salaKey = typeof s === 'object' ? s.id : s
-                        return (
-                          <SelectItem key={salaKey} value={salaNome}>
-                            {salaNome}
-                          </SelectItem>
-                        )
-                      })}
-                    </SelectContent>
-                  </Select>
+                        return {
+                          value: salaNome,
+                          label: salaNome,
+                        }
+                      }) || []}
+                    />
+                  </div>
                   <Dialog open={isCreatingSala} onOpenChange={setIsCreatingSala}>
                     <DialogTrigger asChild>
                       <Button variant="outline" size="icon" disabled={!departamentoSel} title="Criar Sala">
@@ -1205,23 +1833,72 @@ export function EntradaNotaFiscal() {
                 </div>
               </div>
               <div className="flex flex-col gap-2">
-                <Label required>Responsavel</Label>
+                <Label required className={fieldErrors.includes("responsavel") ? "text-destructive" : ""}>Responsavel</Label>
                 <ResponsavelSelect 
                   value={responsavel}
-                  onValueChange={setResponsavel}
-                  onSelect={(s) => setCargoResponsavel(s.cargo || "")}
+                  onValueChange={(v) => {
+                      setResponsavel(v)
+                      if (fieldErrors.includes("responsavel")) setFieldErrors(prev => prev.filter(e => e !== "responsavel"))
+                  }}
+                  onSelect={(s) => {
+                      setCargoResponsavel(s.cargo || "")
+                      if (fieldErrors.includes("cargoResponsavel")) setFieldErrors(prev => prev.filter(e => e !== "cargoResponsavel"))
+                  }}
                   placeholder="Selecione o responsável"
+                  className={fieldErrors.includes("responsavel") ? "border-destructive ring-offset-destructive" : ""}
                 />
               </div>
               <div className="flex flex-col gap-2">
-                <Label required>Cargo</Label>
+                <Label required className={fieldErrors.includes("cargoResponsavel") ? "text-destructive" : ""}>Cargo</Label>
                 <Input
                   id="cargo-lote"
                   placeholder="Cargo do responsavel"
                   value={cargoResponsavel || ""}
-                  onChange={(e) => setCargoResponsavel(e.target.value)}
+                  onChange={(e) => {
+                      setCargoResponsavel(e.target.value)
+                      if (fieldErrors.includes("cargoResponsavel")) setFieldErrors(prev => prev.filter(e => e !== "cargoResponsavel"))
+                  }}
+                  className={fieldErrors.includes("cargoResponsavel") ? "border-destructive focus-visible:ring-destructive" : ""}
                 />
 
+              </div>
+              <div className="flex flex-col gap-2 col-span-full">
+                <Label>Anexar Nota Fiscal (PDF)</Label>
+                <div className="flex items-center gap-2">
+                    <input 
+                        ref={pdfInputRef}
+                        type="file" 
+                        accept="application/pdf" 
+                        className="hidden" 
+                        onChange={handlePdfChange}
+                    />
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full sm:w-auto"
+                        onClick={() => pdfInputRef.current?.click()}
+                    >
+                        <Upload className="h-4 w-4 mr-2" />
+                        {notaFiscalPdf ? "Alterar PDF" : "Selecionar PDF da NF"}
+                    </Button>
+                    {notaFiscalPdf && (
+                        <div className="flex items-center gap-2">
+                             <Badge variant="outline" className="text-green-600 border-green-200 bg-green-50">
+                                <CheckCircle2 className="h-3 w-3 mr-1" />
+                                PDF Anexado
+                             </Badge>
+                             <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                onClick={() => setNotaFiscalPdf(null)}
+                            >
+                                <X className="h-4 w-4" />
+                            </Button>
+                        </div>
+                    )}
+                </div>
+                <p className="text-xs text-muted-foreground">O arquivo PDF sera vinculado a todos os bens gerados nesta importacao.</p>
               </div>
             </div>
           </CardContent>
@@ -1303,6 +1980,20 @@ export function EntradaNotaFiscal() {
                     {isExpanded && (
                       <div className="border-t border-border bg-muted/30 p-6">
                         
+                        {/* Search existing asset */}
+                        <div className="mb-6 p-3 bg-primary/5 rounded-lg border border-primary/20">
+                            <Label className="text-xs font-medium text-primary mb-2 block">
+                                Vincular a um cadastro existente (Opcional)
+                            </Label>
+                            <p className="text-xs text-muted-foreground mb-3">
+                                Se este item ja existe no sistema (mesmo modelo), busque-o para preencher automaticamente a imagem, categoria e detalhes.
+                            </p>
+                            <AssetSearchSelector 
+                                placeholder="Buscar bem existente para copiar dados..."
+                                onSelect={(asset) => handleUpdateItemFromAsset(item.id, asset)}
+                            />
+                        </div>
+
                         {/* Info original XML */}
                         {item.descricaoOriginal && (
                             <div className="mb-6 rounded-lg bg-muted p-3 border border-border/50">
@@ -1337,7 +2028,7 @@ export function EntradaNotaFiscal() {
                           {/* Coluna da Imagem */}
                           <div className="w-full lg:w-1/4 min-w-[220px]">
                             <Label className="text-xs mb-2 block font-medium">Imagem (aplicada a todas as unidades)</Label>
-                            <div className="relative flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-border p-4 hover:bg-muted/50 transition-colors h-[220px] bg-background">
+                            <div data-field-error={itemFieldErrors.includes(`item-${item.id}-imagem`) ? "true" : undefined} className={`relative flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-4 hover:bg-muted/50 transition-colors h-[220px] bg-background ${itemFieldErrors.includes(`item-${item.id}-imagem`) ? "border-destructive bg-destructive/5" : "border-border"}`}>
                               {item.imagem ? (
                                 <>
                                   <img 
@@ -1397,6 +2088,23 @@ export function EntradaNotaFiscal() {
                           {/* Coluna dos Campos */}
                           <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 content-start">
                               
+                            {patrimonioTipo === "definitivo" && (
+                                <div className="col-span-full">
+                                    <Label className="text-xs font-medium">Patrimonio Inicial (Opcional)</Label>
+                                    <Input
+                                        value={item.patrimonioInicial || ""}
+                                        onChange={(e) =>
+                                        handleUpdateItem(item.id, "patrimonioInicial", e.target.value)
+                                        }
+                                        placeholder="Ex: PAT-2025-0500"
+                                        className="mt-1.5 font-mono"
+                                    />
+                                    <p className="text-[10px] text-muted-foreground mt-1">
+                                        Preencha para iniciar a sequencia deste item a partir deste numero.
+                                    </p>
+                                </div>
+                            )}
+
                             <div className="col-span-full">
                                 <Label className="text-xs font-medium" required>Descricao (editavel)</Label>
                                 <Input
@@ -1409,7 +2117,7 @@ export function EntradaNotaFiscal() {
                                 />
                             </div>
 
-                            <div className="flex flex-col gap-1.5">
+                            <div data-field-error={itemFieldErrors.includes(`item-${item.id}-categoria`) ? "true" : undefined} className="flex flex-col gap-1.5">
                                 <Label className="text-xs font-medium" required>Categoria</Label>
                                 <CategoriaSelector
                                     value={item.categoria}
@@ -1417,17 +2125,17 @@ export function EntradaNotaFiscal() {
                                     handleUpdateItem(item.id, "categoria", v as AssetCategory)
                                     }
                                     placeholder="Selecione"
-                                    className="w-full"
+                                    className={itemFieldErrors.includes(`item-${item.id}-categoria`) ? "w-full border-destructive ring-offset-destructive" : "w-full"}
                                 />
                             </div>
 
-                            <div className="flex flex-col gap-1.5">
+                            <div data-field-error={itemFieldErrors.includes(`item-${item.id}-grupo`) ? "true" : undefined} className="flex flex-col gap-1.5">
                                 <Label className="text-xs font-medium">Grupo</Label>
                                 <GroupSelector
                                     value={item.grupo}
                                     onValueChange={(v) => handleUpdateItem(item.id, "grupo", v)}
                                     placeholder="Grupo"
-                                    className="w-full"
+                                    className={itemFieldErrors.includes(`item-${item.id}-grupo`) ? "w-full border-destructive ring-offset-destructive" : "w-full"}
                                 />
                             </div>
 
@@ -1447,6 +2155,32 @@ export function EntradaNotaFiscal() {
                                     value={item.modelo}
                                     onChange={(e) => handleUpdateItem(item.id, "modelo", e.target.value)}
                                     placeholder="Ex: Wind-Free 12K"
+                                />
+                            </div>
+
+                            <div className="flex flex-col gap-1.5">
+                                <Label className="text-xs font-medium">Emenda Parlamentar</Label>
+                                <Input
+                                    value={item.emendaParlamentar || ""}
+                                    onChange={(e) => handleUpdateItem(item.id, "emendaParlamentar", e.target.value)}
+                                    placeholder="Nº da Emenda"
+                                />
+                            </div>
+
+                            <div className="flex flex-col gap-1.5">
+                                <Label className="text-xs font-medium">Garantia (meses)</Label>
+                                <Input
+                                    type="number"
+                                    min={0}
+                                    placeholder="Ex: 12"
+                                    value={item.tempoGarantia || ""}
+                                    onChange={(e) =>
+                                    handleUpdateItem(
+                                        item.id,
+                                        "tempoGarantia",
+                                        e.target.value ? parseInt(e.target.value) : ""
+                                    )
+                                    }
                                 />
                             </div>
 
@@ -1712,9 +2446,9 @@ export function EntradaNotaFiscal() {
             <Edit className="h-4 w-4" />
             Voltar e Editar
           </Button>
-          <Button onClick={() => setShowConfirmDialog(true)} className="gap-2">
-            <Save className="h-4 w-4" />
-            Confirmar Entrada ({patrimoniosGerados.length} bens)
+          <Button onClick={() => setShowConfirmDialog(true)} className="gap-2" disabled={loading}>
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            {loading ? "Processando..." : `Confirmar Entrada (${patrimoniosGerados.length} bens)`}
           </Button>
         </div>
 
@@ -1738,8 +2472,14 @@ export function EntradaNotaFiscal() {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Fornecedor:</span>
-                  <span className="font-medium">{notaInfo?.fornecedor}</span>
+                  <span className="font-medium">{getResolvedFornecedorName() || notaInfo?.fornecedor}</span>
                 </div>
+                {getResolvedFornecedorDocument() && (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Documento:</span>
+                    <span className="font-medium">{formatDocument(getResolvedFornecedorDocument())}</span>
+                  </div>
+                )}
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Tipos de equipamento:</span>
                   <span className="font-medium">{itens.length}</span>
@@ -1762,12 +2502,13 @@ export function EntradaNotaFiscal() {
                 variant="outline"
                 onClick={() => setShowConfirmDialog(false)}
                 className="bg-transparent"
+                disabled={loading}
               >
                 Cancelar
               </Button>
-              <Button onClick={handleConfirmarEntrada} className="gap-2">
-                <CheckCircle2 className="h-4 w-4" />
-                Confirmar
+              <Button onClick={handleConfirmarEntrada} className="gap-2" disabled={loading}>
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                {loading ? "Confirmando..." : "Confirmar"}
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -1804,8 +2545,14 @@ export function EntradaNotaFiscal() {
               </div>
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted-foreground">Fornecedor</span>
-                <span className="font-medium">{notaInfo?.fornecedor}</span>
+                <span className="font-medium">{getResolvedFornecedorName() || notaInfo?.fornecedor}</span>
               </div>
+              {getResolvedFornecedorDocument() && (
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">Documento</span>
+                  <span className="font-medium">{formatDocument(getResolvedFornecedorDocument())}</span>
+                </div>
+              )}
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted-foreground">Arquivo</span>
                 <span className="font-medium text-xs font-mono">{fileName}</span>

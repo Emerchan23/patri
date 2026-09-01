@@ -44,15 +44,11 @@ interface Categoria {
   slug: string
 }
 
-export function CategoriaSelector({
-  value,
-  onValueChange,
-  className,
-  placeholder = "Selecione uma categoria",
-}: CategoriaSelectorProps) {
+export function CategoriaSelector({ value, onValueChange, placeholder = "Selecione", className }: CategoriaSelectorProps) {
   const [open, setOpen] = React.useState(false)
   const [manageOpen, setManageOpen] = React.useState(false)
-  const { data: categorias = [] } = useSWR<Categoria[]>("/categorias", fetcher)
+  const { data: result } = useSWR("/categorias?all=true", fetcher)
+  const categorias = (Array.isArray(result) ? result : (result?.data || [])) as Categoria[]
   const { toast } = useToast()
 
   const [newItem, setNewItem] = React.useState("")
@@ -87,11 +83,12 @@ export function CategoriaSelector({
         toast({ title: "Sucesso", description: "Categoria criada com sucesso!" })
         setNewItem("")
         setNewSlug("")
-        mutate("/categorias")
+        mutate("/categorias?all=true")
       }
     } catch (error: any) {
       console.error(error)
-      toast({ title: "Erro", description: error.message || "Erro ao criar categoria.", variant: "destructive" })
+      const msg = error.response?.data?.error || error.message || "Erro ao criar categoria."
+      toast({ title: "Erro", description: msg, variant: "destructive" })
     } finally {
       setIsCreating(false)
     }
@@ -107,10 +104,11 @@ export function CategoriaSelector({
       } else {
         toast({ title: "Sucesso", description: "Categoria removida com sucesso!" })
         if (value === slug) onValueChange("" as AssetCategory)
-        mutate("/categorias")
+        mutate("/categorias?all=true")
       }
-    } catch (error) {
-      toast({ title: "Erro", description: "Erro ao remover categoria", variant: "destructive" })
+    } catch (error: any) {
+      const msg = error.response?.data?.error || error.message || "Erro ao remover categoria"
+      toast({ title: "Erro", description: msg, variant: "destructive" })
     }
   }
 
@@ -124,9 +122,11 @@ export function CategoriaSelector({
             variant="outline"
             role="combobox"
             aria-expanded={open}
-            className={cn("w-full justify-between font-normal", !value && "text-muted-foreground")}
+            className={cn("w-full justify-between", className)}
           >
-            {selectedItem ? selectedItem.nome : placeholder}
+            {value
+              ? categorias.find((c) => c.slug === value)?.nome || value
+              : placeholder}
             <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
           </Button>
         </PopoverTrigger>

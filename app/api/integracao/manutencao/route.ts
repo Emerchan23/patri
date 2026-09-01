@@ -1,11 +1,22 @@
 import { NextResponse } from "next/server"
 import { query, execute } from "@/lib/db"
 import { registrarLog } from "@/lib/audit"
+import { hasActiveApiKey, maskSecret } from "@/lib/route-security"
 
 // POST /api/integracao/manutencao
 // Recebe: { "numeroPatrimonio": "123", "numeroOS": "OS-2025-001", "status": "em_manutencao" | "ativo" }
 export async function POST(request: Request) {
   try {
+    const apiKeyIsValid = await hasActiveApiKey(request)
+    if (!apiKeyIsValid) {
+      const receivedKey = request.headers.get("x-api-key")
+      console.warn("[Integracao] Rejeitado por API key ausente/invalida", {
+        hasKey: Boolean(receivedKey),
+        keyPreview: receivedKey ? maskSecret(receivedKey) : undefined,
+      })
+      return NextResponse.json({ error: "Nao autorizado" }, { status: 401 })
+    }
+
     const body = await request.json()
     const { numeroPatrimonio, numeroOS, status } = body
 
@@ -13,22 +24,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Numero do patrimonio obrigatorio" }, { status: 400 })
     }
     
-    // VERIFICAÇÃO DE API KEY (SEGURANÇA ADICIONAL)
-    const apiKey = request.headers.get('x-api-key')
-    if (apiKey) {
-        // Se a tabela api_keys existir, valida a chave
-        try {
-            const keys = await query("SELECT chave FROM api_keys WHERE ativo = 1 AND chave = ?", [apiKey]) as any[]
-            if (keys.length === 0) {
-                 console.warn(`[Integracao] Tentativa de acesso com API Key invalida: ${apiKey}`)
-                 // Por enquanto apenas logamos para não quebrar a integração existente sem a tabela
-                 // return NextResponse.json({ error: "API Key invalida" }, { status: 401 })
-            }
-        } catch (e) {
-            // Tabela pode não existir ainda, ignora
-        }
-    }
-
     // Status default para manter compatibilidade
     const targetStatus = status || 'em_manutencao'
     
@@ -170,8 +165,7 @@ export async function POST(request: Request) {
          // Vamos retornar erro se não tiver certeza.
          console.log(`[Integracao] Ambiguidade na busca. Encontrados: ${bens.length}`)
           return NextResponse.json({ 
-            error: "Multiplos bens encontrados. Por favor, forneça o número completo.",
-            bens: bens.map((b: any) => ({ id: b.id, patrimonio: b.patrimonio, descricao: b.descricao }))
+            error: "Multiplos bens encontrados. Forneca o numero completo."
           }, { status: 409 })
     }
 

@@ -111,10 +111,22 @@ export interface ReportOptions {
   settings?: PdfSettings
   secretaria?: string
   departamento?: string
+  sala?: string
   categoria?: string
+  grupo?: string
   status?: string
   dataInicio?: string
   dataFim?: string
+  titulo?: string
+}
+
+function escapeHtml(value: string | number | null | undefined): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
 }
 
 export function gerarRelatorioInventarioGeral(
@@ -122,6 +134,7 @@ export function gerarRelatorioInventarioGeral(
     patrimonio: string
     descricao: string
     categoria: string
+    grupo?: string
     localizacao: { secretaria: string; departamento: string; sala: string }
     responsavel: { nome: string }
     valor: number
@@ -134,6 +147,7 @@ export function gerarRelatorioInventarioGeral(
     if (options.secretaria && options.secretaria !== "todas" && !a.localizacao.secretaria.includes(options.secretaria)) return false
     if (options.departamento && options.departamento !== "todos" && a.localizacao.departamento !== options.departamento) return false
     if (options.categoria && options.categoria !== "todas" && a.categoria !== options.categoria) return false
+    if (options.grupo && options.grupo !== "todos" && a.grupo !== options.grupo) return false
     if (options.status && options.status !== "todos" && a.status !== options.status) return false
     return true
   })
@@ -141,13 +155,16 @@ export function gerarRelatorioInventarioGeral(
   const totalValor = filtered.reduce((sum, a) => sum + a.valor, 0)
   const valorFormatado = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(totalValor)
 
-  const title = "Relatorio de Inventario Geral"
+  let title = "Relatorio de Inventario Geral"
+  if (options.titulo) title = options.titulo
+  
   const subtitle = options.secretaria && options.secretaria !== "todas" ? `Secretaria: ${options.secretaria}` : "Todas as Secretarias"
 
-  const headers = ["Patrimonio", "Descricao", "Categoria", "Localizacao", "Responsavel", "Valor", "Status"]
+  const headers = ["Patrimonio", "Descricao", "Grupo", "Categoria", "Localizacao", "Responsavel", "Valor", "Status"]
   const rows = filtered.map((a) => [
     a.patrimonio,
     a.descricao,
+    a.grupo || "-",
     a.categoria,
     `${a.localizacao.departamento} / ${a.localizacao.sala}`,
     a.responsavel.nome,
@@ -192,19 +209,21 @@ export function gerarRelatorioPorSecretaria(
   options: ReportOptions = {}
 ) {
   const settings = options.settings || defaultPdfSettings
-  const filtered = assets.filter((a) => a.localizacao.secretaria.includes(secretariaNome))
+  const filtered = assets.filter((a) => secretariaNome === "todas" || a.localizacao.secretaria.includes(secretariaNome))
   const totalValor = filtered.reduce((sum, a) => sum + a.valor, 0)
   const valorFormatado = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(totalValor)
 
   // Group by department
   const byDepartment: Record<string, typeof filtered> = {}
   for (const a of filtered) {
-    const dept = a.localizacao.departamento
+    const dept = secretariaNome === "todas" 
+        ? `${a.localizacao.secretaria} - ${a.localizacao.departamento}`
+        : a.localizacao.departamento
     if (!byDepartment[dept]) byDepartment[dept] = []
     byDepartment[dept].push(a)
   }
 
-  const title = `Relatorio Patrimonial - Sec. de ${secretariaNome}`
+  const title = secretariaNome === "todas" ? "Relatorio Patrimonial - Todas as Secretarias" : `Relatorio Patrimonial - Sec. de ${secretariaNome}`
   const headers = ["Patrimonio", "Descricao", "Sala", "Responsavel", "Valor", "Status"]
 
   let tablesHtml = ""
@@ -249,6 +268,147 @@ export function gerarRelatorioPorSecretaria(
     acao: "relatorio_gerado",
     descricao: `Relatorio por Secretaria: ${secretariaNome}`,
     detalhes: `Secretaria: ${secretariaNome}`,
+  }).catch(console.error)
+
+  openPrintWindow(html, title)
+}
+
+export function gerarRelatorioPorDepartamento(
+  assets: Array<{
+    patrimonio: string
+    descricao: string
+    categoria: string
+    localizacao: { secretaria: string; departamento: string; sala: string }
+    responsavel: { nome: string }
+    valor: number
+    status: string
+  }>,
+  departamentoNome: string,
+  secretariaNome: string,
+  options: ReportOptions = {}
+) {
+  const settings = options.settings || defaultPdfSettings
+  const filtered = assets.filter((a) => 
+    (departamentoNome === "todos" || a.localizacao.departamento === departamentoNome) && 
+    (secretariaNome === "todas" || a.localizacao.secretaria.includes(secretariaNome))
+  )
+  const totalValor = filtered.reduce((sum, a) => sum + a.valor, 0)
+  const valorFormatado = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(totalValor)
+
+  // Group by Sala
+  const bySala: Record<string, typeof filtered> = {}
+  for (const a of filtered) {
+    const sala = departamentoNome === "todos" ? `${a.localizacao.departamento} - ${a.localizacao.sala}` : a.localizacao.sala
+    if (!bySala[sala]) bySala[sala] = []
+    bySala[sala].push(a)
+  }
+
+  const title = departamentoNome === "todos" ? "Relatorio Patrimonial - Todos os Departamentos" : `Relatorio Patrimonial - Depto. ${departamentoNome}`
+  const subtitle = secretariaNome === "todas" ? "Todas as Secretarias" : `Secretaria: ${secretariaNome}`
+  const headers = ["Patrimonio", "Descricao", "Responsavel", "Valor", "Status"]
+
+  let tablesHtml = ""
+  for (const [sala, items] of Object.entries(bySala)) {
+    const salaValor = items.reduce((sum, a) => sum + a.valor, 0)
+    tablesHtml += `
+      <div style="margin-top: 20px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+           <h3 style="margin: 0; font-size: 13px; font-weight: 600; color: #1a2332;">Sala: ${sala}</h3>
+           <span style="font-size: 11px; color: #5a6577;">${items.length} bens | ${new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(salaValor)}</span>
+        </div>
+        ${buildTable(
+          headers,
+          items.map((a) => [
+            a.patrimonio,
+            a.descricao,
+            a.responsavel.nome,
+            new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(a.valor),
+            a.status,
+          ])
+        )}
+      </div>
+    `
+  }
+
+  const html = `
+    ${buildHeader(settings)}
+    <div style="margin-bottom: 20px;">
+      <h2 style="margin: 0; font-size: 18px; font-weight: 700; color: #1a56a8;">${title}</h2>
+      <p style="margin: 4px 0 0; font-size: 12px; color: #5a6577;">${subtitle}</p>
+    </div>
+    <div style="display: flex; gap: 24px; margin-bottom: 8px; padding: 12px; background: #f4f6f9; border-radius: 8px;">
+      <div><span style="font-size: 10px; color: #8892a4; display: block;">Total de Bens</span><span style="font-size: 16px; font-weight: 700;">${filtered.length}</span></div>
+      <div><span style="font-size: 10px; color: #8892a4; display: block;">Valor Total</span><span style="font-size: 16px; font-weight: 700;">${valorFormatado}</span></div>
+      <div><span style="font-size: 10px; color: #8892a4; display: block;">Salas</span><span style="font-size: 16px; font-weight: 700;">${Object.keys(bySala).length}</span></div>
+    </div>
+    ${tablesHtml}
+    ${buildFooter(settings)}
+  `
+
+  api.createLog({
+    acao: "relatorio_gerado",
+    descricao: `Relatorio por Departamento: ${departamentoNome}`,
+    detalhes: `Secretaria: ${secretariaNome}`,
+  }).catch(console.error)
+
+  openPrintWindow(html, title)
+}
+
+export function gerarRelatorioPorSala(
+  assets: Array<{
+    patrimonio: string
+    descricao: string
+    categoria: string
+    localizacao: { secretaria: string; departamento: string; sala: string }
+    responsavel: { nome: string }
+    valor: number
+    status: string
+  }>,
+  salaNome: string,
+  departamentoNome: string,
+  secretariaNome: string,
+  options: ReportOptions = {}
+) {
+  const settings = options.settings || defaultPdfSettings
+  const filtered = assets.filter((a) => 
+    (salaNome === "todos" || a.localizacao.sala === salaNome) && 
+    (departamentoNome === "todos" || a.localizacao.departamento === departamentoNome) &&
+    (secretariaNome === "todas" || a.localizacao.secretaria.includes(secretariaNome))
+  )
+  const totalValor = filtered.reduce((sum, a) => sum + a.valor, 0)
+  const valorFormatado = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(totalValor)
+
+  const title = salaNome === "todos" ? "Relatorio Patrimonial - Todas as Salas" : `Relatorio Patrimonial - Sala: ${salaNome}`
+  const subtitle = `${secretariaNome === "todas" ? "Todas Secretarias" : secretariaNome} / ${departamentoNome === "todos" ? "Todos Departamentos" : departamentoNome}`
+  const headers = ["Patrimonio", "Descricao", "Categoria", "Responsavel", "Valor", "Status"]
+
+  const rows = filtered.map((a) => [
+    a.patrimonio,
+    a.descricao,
+    a.categoria,
+    a.responsavel.nome,
+    new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(a.valor),
+    a.status,
+  ])
+
+  const html = `
+    ${buildHeader(settings)}
+    <div style="margin-bottom: 20px;">
+      <h2 style="margin: 0; font-size: 18px; font-weight: 700; color: #1a56a8;">${title}</h2>
+      <p style="margin: 4px 0 0; font-size: 12px; color: #5a6577;">${subtitle}</p>
+    </div>
+    <div style="display: flex; gap: 24px; margin-bottom: 16px; padding: 12px; background: #f4f6f9; border-radius: 8px;">
+      <div><span style="font-size: 10px; color: #8892a4; display: block;">Total de Bens</span><span style="font-size: 16px; font-weight: 700;">${filtered.length}</span></div>
+      <div><span style="font-size: 10px; color: #8892a4; display: block;">Valor Total</span><span style="font-size: 16px; font-weight: 700;">${valorFormatado}</span></div>
+    </div>
+    ${buildTable(headers, rows)}
+    ${buildFooter(settings)}
+  `
+
+  api.createLog({
+    acao: "relatorio_gerado",
+    descricao: `Relatorio por Sala: ${salaNome}`,
+    detalhes: `Depto: ${departamentoNome}`,
   }).catch(console.error)
 
   openPrintWindow(html, title)
@@ -420,7 +580,8 @@ export function gerarRelatorioBaixas(
   const totalValor = baixados.reduce((sum, a) => sum + a.valor, 0)
   const valorFormatado = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(totalValor)
 
-  const title = "Relatorio de Bens Baixados"
+  let title = "Relatorio de Inventario Geral"
+  if (options.titulo) title = options.titulo
   const headers = ["Patrimonio", "Descricao", "Categoria", "Secretaria", "Departamento", "Valor"]
   const rows = baixados.map((a) => [
     a.patrimonio,
@@ -501,6 +662,265 @@ export function gerarRelatorioProvisorio(
     acao: "relatorio_gerado",
     descricao: "Relatorio de Patrimonios Provisorios",
     detalhes: `Total provisorios: ${provisorios.length}`,
+  }).catch(console.error)
+
+  openPrintWindow(html, title)
+}
+
+export function gerarPdfApoioColagemEtiquetas(
+  assets: Array<{
+    id: string | number
+    patrimonio: string
+    descricao: string
+    numeroSerie?: string
+    marca?: string
+    modelo?: string
+    imagem?: string
+    etiquetaStatus?: "pendente" | "enviada" | "colada" | null
+    localizacao: { secretaria: string; departamento: string; sala: string }
+    responsavel: { nome: string }
+  }>,
+  options: ReportOptions & { somenteAguardandoColagem?: boolean } = {}
+) {
+  const settings = options.settings || defaultPdfSettings
+  const filtered = options.somenteAguardandoColagem
+    ? assets.filter((asset) => asset.etiquetaStatus === "enviada")
+    : assets
+
+  const comNumeroSerie = filtered.filter((asset) => Boolean(asset.numeroSerie?.trim())).length
+  const semNumeroSerie = filtered.length - comNumeroSerie
+  const title = options.somenteAguardandoColagem
+    ? "PDF de Apoio a Colagem - Aguardando Colagem"
+    : "PDF de Apoio a Colagem - Pendencias Filtradas"
+
+  const escopo: string[] = []
+  if (options.secretaria) escopo.push(`Secretaria: ${escapeHtml(options.secretaria)}`)
+  if (options.departamento) escopo.push(`Departamento: ${escapeHtml(options.departamento)}`)
+  if (options.sala) escopo.push(`Sala: ${escapeHtml(options.sala)}`)
+
+  const cardsHtml = filtered
+    .map((asset, index) => {
+      const patrimonio = escapeHtml(asset.patrimonio || "Sem patrimonio")
+      const descricao = escapeHtml(asset.descricao)
+      const numeroSerie = asset.numeroSerie?.trim()
+        ? escapeHtml(asset.numeroSerie)
+        : "Sem numero de serie informado"
+      const marcaModelo = [asset.marca, asset.modelo].filter(Boolean).map(escapeHtml).join(" / ")
+      const localizacao = [
+        asset.localizacao.secretaria,
+        asset.localizacao.departamento,
+        asset.localizacao.sala,
+      ]
+        .filter(Boolean)
+        .map(escapeHtml)
+        .join(" / ")
+      const responsavel = escapeHtml(asset.responsavel?.nome || "Nao informado")
+      const status = asset.etiquetaStatus === "enviada" ? "Aguardando colagem" : "Pendente"
+      const imageHtml = asset.imagem
+        ? `<img src="${escapeHtml(asset.imagem)}" alt="${descricao}" style="width: 96px; height: 96px; object-fit: cover; border-radius: 10px; border: 1px solid #d9e0ea;" />`
+        : `<div style="width: 96px; height: 96px; border-radius: 10px; border: 1px dashed #c7d0dd; display:flex; align-items:center; justify-content:center; font-size:11px; color:#7c8798; text-align:center; padding:8px;">Sem foto</div>`
+
+      return `
+        <div style="page-break-inside: avoid; border: 1px solid #d9e0ea; border-radius: 14px; padding: 14px; margin-bottom: 14px; background: #fff;">
+          <div style="display: flex; gap: 14px; align-items: flex-start;">
+            <div style="flex: 0 0 96px;">${imageHtml}</div>
+            <div style="flex: 1;">
+              <div style="display:flex; justify-content: space-between; gap: 10px; align-items:flex-start;">
+                <div>
+                  <div style="display:inline-block; padding: 4px 10px; border-radius: 999px; background:#eff6ff; color:#1d4ed8; font-size:11px; font-weight:700; letter-spacing:0.3px;">${patrimonio}</div>
+                  <h3 style="margin: 10px 0 6px; font-size: 16px; line-height: 1.25; color:#122033;">${descricao}</h3>
+                </div>
+                <div style="padding: 4px 8px; border-radius: 999px; background:#fef3c7; color:#92400e; font-size:10px; font-weight:700; white-space:nowrap;">${status}</div>
+              </div>
+              <div style="margin-top: 8px; padding: 10px 12px; border-radius: 10px; background:#f8fafc; border:1px solid #e2e8f0;">
+                <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:#64748b; font-weight:700;">Numero de Serie</div>
+                <div style="margin-top:4px; font-size:15px; line-height:1.35; font-weight:700; color:#0f172a; font-family: 'Consolas', 'Courier New', monospace;">${numeroSerie}</div>
+              </div>
+              <div style="display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; margin-top: 10px;">
+                <div>
+                  <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:#64748b; font-weight:700;">Marca / Modelo</div>
+                  <div style="margin-top:3px; font-size:12px; color:#1f2937;">${marcaModelo || "Nao informado"}</div>
+                </div>
+                <div>
+                  <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:#64748b; font-weight:700;">Responsavel</div>
+                  <div style="margin-top:3px; font-size:12px; color:#1f2937;">${responsavel}</div>
+                </div>
+                <div style="grid-column: 1 / -1;">
+                  <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:#64748b; font-weight:700;">Localizacao</div>
+                  <div style="margin-top:3px; font-size:12px; color:#1f2937;">${localizacao || "Nao informada"}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center; gap: 16px; margin-top: 12px; padding-top: 10px; border-top: 1px dashed #d9e0ea;">
+            <div style="font-size:11px; color:#64748b;">Item ${index + 1} de ${filtered.length}</div>
+            <div style="display:flex; align-items:center; gap: 14px; font-size:11px; color:#334155;">
+              <span style="display:inline-flex; align-items:center; gap:6px;"><span style="width:14px; height:14px; border:1px solid #64748b; border-radius:3px; display:inline-block;"></span> Conferido</span>
+              <span style="display:inline-flex; align-items:center; gap:6px;"><span style="width:14px; height:14px; border:1px solid #64748b; border-radius:3px; display:inline-block;"></span> Etiqueta colada</span>
+            </div>
+          </div>
+        </div>
+      `
+    })
+    .join("")
+
+  const html = `
+    ${buildHeader(settings)}
+    <div style="margin-bottom: 18px;">
+      <h2 style="margin: 0; font-size: 18px; font-weight: 700; color: #1a56a8;">${title}</h2>
+      <p style="margin: 4px 0 0; font-size: 12px; color: #5a6577;">
+        Folha operacional para conferencia e colagem de etiquetas patrimoniais.
+      </p>
+      ${escopo.length > 0 ? `<p style="margin: 8px 0 0; font-size: 11px; color: #64748b;">${escopo.join(" | ")}</p>` : ""}
+    </div>
+    <div style="display:flex; gap:16px; margin-bottom:16px; padding:12px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px;">
+      <div><span style="font-size:10px; color:#64748b; display:block;">Itens no PDF</span><span style="font-size:16px; font-weight:700;">${filtered.length}</span></div>
+      <div><span style="font-size:10px; color:#64748b; display:block;">Com numero de serie</span><span style="font-size:16px; font-weight:700;">${comNumeroSerie}</span></div>
+      <div><span style="font-size:10px; color:#64748b; display:block;">Sem numero de serie</span><span style="font-size:16px; font-weight:700;">${semNumeroSerie}</span></div>
+    </div>
+    ${cardsHtml || `<div style="padding:18px; border:1px dashed #cbd5e1; border-radius:10px; color:#64748b; font-size:12px;">Nenhum item encontrado para este PDF.</div>`}
+    ${buildFooter(settings)}
+  `
+
+  api.createLog({
+    acao: "relatorio_gerado",
+    descricao: "PDF de apoio a colagem gerado",
+    detalhes: `Total: ${filtered.length} | Somente aguardando colagem: ${options.somenteAguardandoColagem ? "sim" : "nao"}`,
+  }).catch(console.error)
+
+  openPrintWindow(html, title)
+}
+
+export function gerarPdfSolicitacaoMovimentacao(
+  solicitacao: {
+    id: string | number
+    solicitanteNome: string
+    solicitanteRole?: string
+    secretariaOrigem: string
+    secretariaDestino: string
+    departamentoDestino: string
+    salaDestino: string
+    motivo: string
+    status: string
+    criadoEm?: string
+    decididoEm?: string
+    aprovadoPorNome?: string | null
+    rejeitadoPorNome?: string | null
+    canceladoPorNome?: string | null
+    motivoRejeicao?: string
+    itens: Array<{
+      patrimonio: string
+      bemDescricao: string
+      de?: {
+        secretaria?: string
+        departamento?: string
+        sala?: string
+      }
+    }>
+  },
+  options: ReportOptions = {}
+) {
+  const settings = options.settings || defaultPdfSettings
+  const title = `Solicitacao de Mudanca Patrimonial #${solicitacao.id}`
+  const statusLabel = {
+    pendente: "Pendente",
+    aprovada: "Aprovada",
+    rejeitada: "Rejeitada",
+    cancelada: "Cancelada",
+  }[solicitacao.status] || solicitacao.status
+
+  const itensRows = solicitacao.itens.map((item) => [
+    escapeHtml(item.patrimonio || "-"),
+    escapeHtml(item.bemDescricao || "-"),
+    escapeHtml(item.de?.secretaria || solicitacao.secretariaOrigem || "-"),
+    escapeHtml(item.de?.departamento || "-"),
+    escapeHtml(item.de?.sala || "-"),
+  ])
+
+  const historicoDecisao = solicitacao.aprovadoPorNome
+    ? `Aprovada por ${escapeHtml(solicitacao.aprovadoPorNome)}${solicitacao.decididoEm ? ` em ${new Intl.DateTimeFormat("pt-BR").format(new Date(solicitacao.decididoEm))}` : ""}.`
+    : solicitacao.rejeitadoPorNome
+      ? `Rejeitada por ${escapeHtml(solicitacao.rejeitadoPorNome)}${solicitacao.decididoEm ? ` em ${new Intl.DateTimeFormat("pt-BR").format(new Date(solicitacao.decididoEm))}` : ""}.`
+      : solicitacao.canceladoPorNome
+        ? `Cancelada por ${escapeHtml(solicitacao.canceladoPorNome)}${solicitacao.decididoEm ? ` em ${new Intl.DateTimeFormat("pt-BR").format(new Date(solicitacao.decididoEm))}` : ""}.`
+        : "Aguardando decisao do patrimonio."
+
+  const html = `
+    ${buildHeader(settings)}
+    <div style="margin-bottom: 20px;">
+      <h2 style="margin: 0; font-size: 18px; font-weight: 700; color: #1a56a8;">${title}</h2>
+      <p style="margin: 4px 0 0; font-size: 12px; color: #5a6577;">
+        Documento de solicitacao de mudanca de local patrimonial.
+      </p>
+    </div>
+
+    <div style="display:flex; gap: 16px; flex-wrap: wrap; margin-bottom: 18px;">
+      <div style="flex:1; min-width:220px; padding:12px; border:1px solid #e2e8f0; border-radius:10px; background:#f8fafc;">
+        <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:#64748b; font-weight:700;">Solicitacao</div>
+        <div style="margin-top:4px; font-size:15px; font-weight:700; color:#0f172a;">#${escapeHtml(solicitacao.id)}</div>
+        <div style="margin-top:4px; font-size:12px; color:#475569;">Status: ${escapeHtml(statusLabel)}</div>
+      </div>
+      <div style="flex:1; min-width:220px; padding:12px; border:1px solid #e2e8f0; border-radius:10px; background:#f8fafc;">
+        <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:#64748b; font-weight:700;">Solicitante</div>
+        <div style="margin-top:4px; font-size:15px; font-weight:700; color:#0f172a;">${escapeHtml(solicitacao.solicitanteNome)}</div>
+        <div style="margin-top:4px; font-size:12px; color:#475569;">Perfil: ${escapeHtml(solicitacao.solicitanteRole || "Nao informado")}</div>
+      </div>
+      <div style="flex:1; min-width:220px; padding:12px; border:1px solid #e2e8f0; border-radius:10px; background:#f8fafc;">
+        <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:#64748b; font-weight:700;">Data da solicitacao</div>
+        <div style="margin-top:4px; font-size:15px; font-weight:700; color:#0f172a;">${solicitacao.criadoEm ? new Intl.DateTimeFormat("pt-BR").format(new Date(solicitacao.criadoEm)) : "-"}</div>
+      </div>
+    </div>
+
+    <div style="display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px;">
+      <div style="padding:14px; border:1px solid #e2e8f0; border-radius:12px;">
+        <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:#64748b; font-weight:700;">Origem da solicitacao</div>
+        <div style="margin-top:6px; font-size:15px; font-weight:700; color:#0f172a;">${escapeHtml(solicitacao.secretariaOrigem)}</div>
+      </div>
+      <div style="padding:14px; border:1px solid #e2e8f0; border-radius:12px;">
+        <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:#64748b; font-weight:700;">Destino solicitado</div>
+        <div style="margin-top:6px; font-size:15px; font-weight:700; color:#0f172a;">${escapeHtml(solicitacao.departamentoDestino)} / ${escapeHtml(solicitacao.salaDestino)}</div>
+        <div style="margin-top:4px; font-size:12px; color:#475569;">${escapeHtml(solicitacao.secretariaDestino)}</div>
+      </div>
+    </div>
+
+    <div style="margin-bottom: 16px; padding:14px; border:1px solid #e2e8f0; border-radius:12px;">
+      <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:#64748b; font-weight:700;">Motivo da solicitacao</div>
+      <div style="margin-top:8px; font-size:13px; line-height:1.65; color:#1f2937; white-space:pre-wrap;">${escapeHtml(solicitacao.motivo || "-")}</div>
+    </div>
+
+    <div style="margin-bottom: 16px; padding:14px; border:1px solid #e2e8f0; border-radius:12px;">
+      <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:#64748b; font-weight:700;">Bens incluidos</div>
+      ${buildTable(["Patrimonio", "Descricao", "Secretaria atual", "Departamento atual", "Sala atual"], itensRows)}
+    </div>
+
+    <div style="margin-bottom: 16px; padding:14px; border:1px solid #e2e8f0; border-radius:12px; background:#f8fafc;">
+      <div style="font-size:10px; text-transform:uppercase; letter-spacing:0.6px; color:#64748b; font-weight:700;">Andamento</div>
+      <div style="margin-top:8px; font-size:13px; line-height:1.65; color:#1f2937;">${historicoDecisao}</div>
+      ${solicitacao.motivoRejeicao ? `<div style="margin-top:8px; font-size:12px; color:#b91c1c;"><strong>Motivo da rejeicao:</strong> ${escapeHtml(solicitacao.motivoRejeicao)}</div>` : ""}
+    </div>
+
+    <div style="display:flex; gap:40px; justify-content:center; margin-top:52px;">
+      <div style="text-align:center; width:280px;">
+        <div style="border-top:1px solid #334155; padding-top:8px;">
+          <p style="margin:0; font-size:11px; font-weight:600;">${escapeHtml(solicitacao.solicitanteNome)}</p>
+          <p style="margin:2px 0 0; font-size:10px; color:#64748b;">Solicitante</p>
+        </div>
+      </div>
+      <div style="text-align:center; width:280px;">
+        <div style="border-top:1px solid #334155; padding-top:8px;">
+          <p style="margin:0; font-size:11px; font-weight:600;">${escapeHtml(settings.assinaturaTexto)}</p>
+          <p style="margin:2px 0 0; font-size:10px; color:#64748b;">${escapeHtml(settings.assinaturaCargo)}</p>
+        </div>
+      </div>
+    </div>
+
+    ${buildFooter(settings)}
+  `
+
+  api.createLog({
+    acao: "relatorio_gerado",
+    descricao: `PDF de solicitacao de movimentacao #${solicitacao.id}`,
+    detalhes: `Status: ${solicitacao.status} | Itens: ${solicitacao.itens.length}`,
   }).catch(console.error)
 
   openPrintWindow(html, title)

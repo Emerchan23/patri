@@ -1,26 +1,26 @@
 import { NextResponse } from "next/server"
 import { query, execute } from "@/lib/db"
-import { getAuthUserFromRequest } from "@/lib/auth-utils"
 import crypto from "crypto"
+import { withRole } from "@/lib/api-auth"
+import { maskSecret } from "@/lib/route-security"
 
 // GET: Lista chaves
-export async function GET(request: Request) {
-  const session = await getAuthUserFromRequest(request)
-  if (!session) return NextResponse.json({ error: "Nao autorizado" }, { status: 401 })
-
+export const GET = withRole(["administrador"], async () => {
   try {
     const keys = await query("SELECT id, nome, chave, ativo, criado_em FROM api_keys ORDER BY criado_em DESC")
-    return NextResponse.json(keys)
+    return NextResponse.json(
+      (keys as Array<Record<string, unknown>>).map((key) => ({
+        ...key,
+        chave: typeof key.chave === "string" ? maskSecret(key.chave) : undefined,
+      }))
+    )
   } catch (error) {
     return NextResponse.json({ error: "Erro ao buscar chaves" }, { status: 500 })
   }
-}
+})
 
 // POST: Cria chave
-export async function POST(request: Request) {
-  const session = await getAuthUserFromRequest(request)
-  if (!session) return NextResponse.json({ error: "Nao autorizado" }, { status: 401 })
-
+export const POST = withRole(["administrador"], async (request) => {
   try {
     const body = await request.json()
     const { nome } = body
@@ -51,4 +51,4 @@ export async function POST(request: Request) {
     console.error(error)
     return NextResponse.json({ error: "Erro ao criar chave" }, { status: 500 })
   }
-}
+})

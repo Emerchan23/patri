@@ -37,6 +37,7 @@ interface ResponsavelSelectProps {
   placeholder?: string
   disabled?: boolean
   onSelect?: (servidor: any) => void
+  className?: string
 }
 
 export function ResponsavelSelect({
@@ -45,9 +46,13 @@ export function ResponsavelSelect({
   placeholder = "Selecione o responsável",
   disabled = false,
   onSelect,
+  className,
 }: ResponsavelSelectProps) {
   const { toast } = useToast()
-  const { data: servidores, mutate } = useSWR("/servidores", fetcher)
+  // Changed to fetch all to ensure full list is available for search and selection
+  const { data: servidoresData, mutate } = useSWR("/servidores?all=true", fetcher)
+  const servidores = Array.isArray(servidoresData) ? servidoresData : (servidoresData?.data || [])
+
   const [open, setOpen] = useState(false)
   const [view, setView] = useState<"list" | "create">("list")
   const [loading, setLoading] = useState(false)
@@ -73,6 +78,7 @@ export function ResponsavelSelect({
       onValueChange(newServidor.nome)
       if (onSelect) onSelect(newServidor)
       
+      setOpen(false)
       // Reset and go back to list
       setNome("")
       setCargo("")
@@ -137,6 +143,7 @@ export function ResponsavelSelect({
     <div className="flex items-center gap-2">
       <div className="flex-1">
         <SearchableSelect
+          className={className}
           value={value}
           onValueChange={(val) => {
             onValueChange(val)
@@ -145,10 +152,13 @@ export function ResponsavelSelect({
               if (selected) onSelect(selected.original)
             }
           }}
-          items={items}
+          disabled={disabled}
           placeholder={placeholder}
           searchPlaceholder="Buscar responsável..."
-          disabled={disabled}
+          items={items.map((i: any) => ({
+            value: i.value,
+            label: i.label,
+          }))}
         />
       </div>
       <Dialog open={open} onOpenChange={(o) => {

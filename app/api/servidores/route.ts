@@ -1,13 +1,14 @@
 
 import { NextResponse } from "next/server"
 import { query, execute } from "@/lib/db"
+import { withAuth, withPermission } from "@/lib/api-auth"
 
-export async function GET(request: Request) {
+export const GET = withAuth(async (request) => {
   try {
     const { searchParams } = new URL(request.url)
     const busca = searchParams.get("busca")
 
-    let sql = "SELECT * FROM servidores WHERE 1=1"
+    let sql = "SELECT id, nome, cargo FROM servidores WHERE 1=1"
     const params: any[] = []
 
     if (busca) {
@@ -28,9 +29,9 @@ export async function GET(request: Request) {
       { status: 500 }
     )
   }
-}
+})
 
-export async function POST(request: Request) {
+export const POST = withPermission("gerenciarCadastrosAuxiliares", async (request) => {
   try {
     const body = await request.json()
     const { nome, cargo, cpf } = body
@@ -60,4 +61,4 @@ export async function POST(request: Request) {
       { status: 500 }
     )
   }
-}
+})

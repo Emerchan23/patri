@@ -1,5 +1,21 @@
 import { NextResponse } from "next/server"
 import { query } from "@/lib/db"
+import crypto from "crypto"
+import { cacheGetJson, cacheSetJson, checkRateLimit } from "@/lib/redis-tools"
+
+function getClientIp(request: Request) {
+  const xff = request.headers.get("x-forwarded-for")
+  if (xff) return xff.split(",")[0].trim()
+  const xri = request.headers.get("x-real-ip")
+  if (xri) return xri.trim()
+  return "unknown"
+}
+
+function cacheKeyForBusca(busca: string) {
+  const normalized = busca.trim().toLowerCase()
+  const hash = crypto.createHash("sha256").update(normalized).digest("hex")
+  return `cache:public:consulta:v1:${hash}`
+}
 
 // Public API for Viewer App (No Auth)
 export async function GET(request: Request) {
@@ -11,6 +27,25 @@ export async function GET(request: Request) {
   }
 
   try {
+    const ip = getClientIp(request)
+    const limit = await checkRateLimit({
+      key: `rl:public:consulta:ip:${ip}`,
+      limit: 120,
+      windowSeconds: 60,
+    })
+    if (!limit.allowed) {
+      return NextResponse.json(
+        { error: "Muitas consultas. Aguarde um pouco e tente novamente." },
+        { status: 429 }
+      )
+    }
+
+    const key = cacheKeyForBusca(busca)
+    const cached = await cacheGetJson<{ status: number; body: any }>(key)
+    if (cached) {
+      return NextResponse.json(cached.body, { status: cached.status })
+    }
+
     // 1. Check if it's a Room (Sala) - Handle "SALA:ID" format from QR Code
     let salaId = busca;
     let isSalaCode = false;
@@ -55,15 +90,18 @@ export async function GET(request: Request) {
       // Transform rows to match frontend expectations
       const bens = bensRows.map(dbRowToAsset);
 
-      return NextResponse.json({
+      const body = {
         type: 'sala',
         data: {
-          sala: sala,
-          departamento: departamento,
-          secretaria: secretaria,
+          sala: sala ? { id: sala.id, nome: sala.nome } : null,
+          departamento: departamento ? { id: departamento.id, nome: departamento.nome } : null,
+          secretaria: secretaria ? { id: secretaria.id, nome: secretaria.nome } : null,
           bens: bens
         }
-      })
+      }
+
+      await cacheSetJson(key, { status: 200, body }, 60)
+      return NextResponse.json(body)
     }
 
     // 2. Check if it's an Asset (Bem)
@@ -99,13 +137,17 @@ export async function GET(request: Request) {
     }
 
     if (bem) {
-        return NextResponse.json({
+        const body = {
             type: 'bem',
             data: dbRowToAsset(bem)
-        })
+        }
+        await cacheSetJson(key, { status: 200, body }, 60)
+        return NextResponse.json(body)
     }
 
-    return NextResponse.json({ error: "Nenhum registro encontrado" }, { status: 404 })
+    const notFoundBody = { error: "Nenhum registro encontrado" }
+    await cacheSetJson(key, { status: 404, body: notFoundBody }, 15)
+    return NextResponse.json(notFoundBody, { status: 404 })
 
   } catch (error) {
     console.error("Erro na consulta pública:", error)
@@ -141,24 +183,40 @@ function dbRowToAsset(row: any) {
     // Return object mixing snake_case (for legacy app compatibility) and camelCase
     // The app accesses properties like: item['patrimonio_provisorio'], item['estado_conservacao']
     return {
-      ...row, // Include all original DB columns (snake_case)
-      
-      // Overwrite/Add specific fields required by logic
       id: String(row.id),
-      localizacao: localizacao, // Required for location parsing
-      
-      // Ensure specific fields exist even if null in DB (for safety)
+      descricao: row.descricao,
       patrimonio: row.patrimonio,
       patrimonio_provisorio: row.patrimonio_provisorio,
-      categoria: row.categoria_slug, // App uses 'categoria' but logic might use 'categoria_slug' or vice versa
+      patrimonioProvisorio: row.patrimonio_provisorio,
+      categoria: row.categoria_slug,
       grupo: row.grupo || "Geral",
-      
-      // Formatting
+      marca: row.marca || null,
+      modelo: row.modelo || null,
+      numero_serie: row.numero_serie || null,
+      numeroSerie: row.numero_serie || null,
+      status: row.status,
+      imagem: row.imagem || null,
+      fornecedor: row.fornecedor || null,
+      estado_conservacao: row.estado_conservacao || null,
+      localizacao,
+      responsavel: {
+        nome: row.responsavel_nome || null,
+        cargo: row.responsavel_cargo || null,
+      },
       data_aquisicao: dataAquisicao,
       valor: Number(row.valor || 0),
     }
   } catch (err) {
     console.error(`Error mapping asset row ${row.id}:`, err);
-    return row; // Fallback to raw row
+    return {
+      id: String(row.id),
+      descricao: row.descricao || "",
+      patrimonio: row.patrimonio || null,
+      patrimonio_provisorio: row.patrimonio_provisorio || null,
+      patrimonioProvisorio: row.patrimonio_provisorio || null,
+      categoria: row.categoria_slug || "",
+      grupo: row.grupo || "Geral",
+      status: row.status || "ativo",
+    }
   }
 }

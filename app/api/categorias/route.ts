@@ -4,15 +4,62 @@ import { withAuth } from "@/lib/api-auth"
 import { registrarLog } from "@/lib/audit"
 
 // GET /api/categorias
-export const GET = withAuth(async () => {
-  const rows = await query("SELECT * FROM categorias ORDER BY nome")
-  const categorias = (rows as Record<string, unknown>[]).map((row) => ({
+export const GET = withAuth(async (request) => {
+  const { searchParams } = new URL(request.url)
+
+  if (searchParams.get("all") === "true") {
+    const rows = await query<any>("SELECT * FROM categorias ORDER BY nome")
+    const categorias = rows.map((row) => ({
+      id: String(row.id),
+      nome: row.nome,
+      slug: row.slug,
+      descricao: row.descricao || undefined,
+    }))
+    return NextResponse.json(categorias)
+  }
+
+  const page = Number(searchParams.get("page")) || 1
+  const limit = Number(searchParams.get("limit")) || 10
+  const search = searchParams.get("search") || ""
+  const offset = (page - 1) * limit
+
+  let countQuery = "SELECT COUNT(*) as total FROM categorias"
+  let dataQuery = "SELECT * FROM categorias"
+  const params: any[] = []
+
+  if (search) {
+    const searchClause = " WHERE nome LIKE ?"
+    countQuery += searchClause
+    dataQuery += searchClause
+    params.push(`%${search}%`)
+  }
+
+  dataQuery += " ORDER BY nome LIMIT ? OFFSET ?"
+  
+  // Get total count
+  const countResult = await query<any>(countQuery, params)
+  const total = countResult[0].total
+  const totalPages = Math.ceil(total / limit)
+
+  // Get data
+  const rows = await query<any>(dataQuery, [...params, limit, offset])
+  
+  const categorias = rows.map((row) => ({
     id: String(row.id),
     nome: row.nome,
     slug: row.slug,
     descricao: row.descricao || undefined,
   }))
-  return NextResponse.json(categorias)
+
+  return NextResponse.json({
+    data: categorias,
+    meta: {
+      total,
+      page,
+      limit,
+      totalPages
+    }
+  })
 })
 
 // POST /api/categorias

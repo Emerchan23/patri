@@ -1,10 +1,11 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useMemo } from "react"
 import useSWR, { mutate as globalMutate } from "swr"
 import { useSearchParams, useRouter } from "next/navigation"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -58,22 +59,27 @@ import {
   X,
   Loader2,
   Trash2,
+  Copy,
+  Download,
+  Send,
 } from "lucide-react"
 import {
   getStatusLabel,
   getStatusColor,
   getCategoryLabel,
+  getEtiquetaStatusColor,
+  getEtiquetaStatusLabel,
   formatCurrency,
   formatDate,
 } from "@/lib/data"
-import { api } from "@/lib/api-client"
+import { api, getApiErrorMessage, isApiError } from "@/lib/api-client"
 import { Label } from "@/components/ui/label"
 import { useAuth } from "@/lib/auth-context"
 import { useToast } from "@/components/ui/use-toast"
 import { GroupSelector } from "@/components/group-selector"
 import { MarcaSelector } from "@/components/marca-selector"
 import { FornecedorSelector } from "@/components/fornecedor-selector"
-
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import { Checkbox } from "@/components/ui/checkbox"
 
 export function BensList() {
@@ -81,6 +87,14 @@ export function BensList() {
   const { user, hasPermission } = useAuth()
   const searchParams = useSearchParams()
   const router = useRouter()
+
+  // Fetch locations for edit/duplicate form
+  const { data: locationsResult } = useSWR("/secretarias?all=true", () => api.getSecretarias("all=true"))
+  const secretariasList = (Array.isArray(locationsResult) ? locationsResult : (locationsResult?.data || []))
+
+  // Fetch categories dynamically
+  const { data: categoriasResult } = useSWR("/categorias?all=true", () => api.getCategorias("all=true"))
+  const categoriasList = (Array.isArray(categoriasResult) ? categoriasResult : (categoriasResult?.data || []))
 
   const [page, setPage] = useState(1)
   const [limit] = useState(20)
@@ -90,6 +104,7 @@ export function BensList() {
   const [isBulkDeleting, setIsBulkDeleting] = useState(false)
   const [bulkDeleteReason, setBulkDeleteReason] = useState("")
   const [showBulkDeleteDialog, setShowBulkDeleteDialog] = useState(false)
+  const [workflowLoadingId, setWorkflowLoadingId] = useState<string | null>(null)
 
   const [search, setSearch] = useState(searchParams.get("busca") || "")
   const [statusFilter, setStatusFilter] = useState<string>(searchParams.get("status") || "todos")
@@ -97,10 +112,12 @@ export function BensList() {
   const [categoriaFilter, setCategoriaFilter] = useState<string>(searchParams.get("categoria") || "todos")
   const [tipoFilter, setTipoFilter] = useState<string>(searchParams.get("tipo") || "todos")
   const [warrantyFilter, setWarrantyFilter] = useState<string>(searchParams.get("em_garantia") === "true" ? "em_garantia" : searchParams.get("em_garantia") === "false" ? "fora_garantia" : "todos")
+  const [emendaFilter, setEmendaFilter] = useState<string>(searchParams.get("emenda") || "")
   
   // Location filters from URL (sidebar navigation)
   const [secretariaFilter, setSecretariaFilter] = useState<string>(searchParams.get("secretaria") || "")
   const [departamentoFilter, setDepartamentoFilter] = useState<string>(searchParams.get("departamento") || "")
+  const [salaFilter, setSalaFilter] = useState<string>(searchParams.get("sala") || "")
 
   const [selectedAsset, setSelectedAsset] = useState<any | null>(null)
   
@@ -126,14 +143,22 @@ export function BensList() {
     else if (garantia === "false") setWarrantyFilter("fora_garantia")
     else setWarrantyFilter("todos")
 
+    const emenda = searchParams.get("emenda") || ""
+    if (emenda !== emendaFilter) setEmendaFilter(emenda)
+
     const sec = searchParams.get("secretaria") || ""
     if (sec !== secretariaFilter) setSecretariaFilter(sec)
 
     const dep = searchParams.get("departamento") || ""
     if (dep !== departamentoFilter) setDepartamentoFilter(dep)
+
+    const sala = searchParams.get("sala") || ""
+    if (sala !== salaFilter) setSalaFilter(sala)
   }, [searchParams])
 
   const [showEditDialog, setShowEditDialog] = useState(false)
+  const [isCloning, setIsCloning] = useState(false)
+  const [patrimonioGeneratedBySystem, setPatrimonioGeneratedBySystem] = useState(false)
   const [editForm, setEditForm] = useState({
     patrimonio: "",
     descricao: "",
@@ -144,12 +169,44 @@ export function BensList() {
     modelo: "",
     valor: "",
     imagem: null as string | null,
+    notaFiscal: null as string | null,
     motivo_baixa: "",
     tempo_garantia: "",
     numero_serie: "",
     fornecedor: "",
+    secretaria: "",
+    departamento: "",
+    sala: "",
+    dataAquisicao: "",
+    observacoes: "",
+    emendaParlamentar: "",
   })
+  
+  // Logic for location filtering in edit form
+  const selectedSec = secretariasList.find((s: any) => s.nome === editForm.secretaria)
+  const departamentosList = selectedSec?.departamentos || []
+  const selectedDep = departamentosList.find((d: any) => d.nome === editForm.departamento)
+  const salasList = selectedDep?.salas || []
+
+  // Logic for location filtering in search filters
+  const availableDepartamentos = useMemo(() => {
+    if (secretariaFilter) {
+      const sec = secretariasList.find((s: any) => s.nome === secretariaFilter);
+      return sec?.departamentos || [];
+    }
+    return secretariasList.flatMap((s: any) => s.departamentos || []);
+  }, [secretariasList, secretariaFilter]);
+
+  const availableSalas = useMemo(() => {
+    if (departamentoFilter) {
+      const dep = availableDepartamentos.find((d: any) => d.nome === departamentoFilter);
+      return dep?.salas || [];
+    }
+    return availableDepartamentos.flatMap((d: any) => d.salas || []);
+  }, [availableDepartamentos, departamentoFilter]);
+
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const pdfInputRef = useRef<HTMLInputElement>(null)
   const [saving, setSaving] = useState(false)
 
   const formatCurrencyInput = (value: string) => {
@@ -181,10 +238,16 @@ export function BensList() {
   if (categoriaFilter !== "todos") queryParams.set("categoria", categoriaFilter)
   if (tipoFilter !== "todos") queryParams.set("tipo", tipoFilter)
   if (warrantyFilter !== "todos") queryParams.set("em_garantia", warrantyFilter === "em_garantia" ? "true" : "false")
+  if (emendaFilter) queryParams.set("emenda", emendaFilter)
   if (secretariaFilter) queryParams.set("secretaria", secretariaFilter)
   if (departamentoFilter) queryParams.set("departamento", departamentoFilter)
+  if (salaFilter) queryParams.set("sala", salaFilter)
 
-  const { data: result, isLoading, mutate } = useSWR(["bens-list", queryParams.toString()], () => api.getBens(queryParams.toString()))
+  const { data: result, isLoading, mutate } = useSWR(
+    ["bens-list", queryParams.toString()], 
+    () => api.getBens(queryParams.toString()),
+    { keepPreviousData: true }
+  )
   
   const bens = result?.data || []
   const meta = result?.meta || { total: 0, page: 1, limit: 20, totalPages: 1 }
@@ -196,7 +259,40 @@ export function BensList() {
   )
   const assetMovements = movementsResult?.data || []
 
+  const handleGenerateProvisional = async () => {
+    try {
+      let year = new Date().getFullYear().toString()
+      
+      // Tenta usar o ano da data de aquisicao se disponivel
+      if (editForm.dataAquisicao) {
+        const date = new Date(editForm.dataAquisicao)
+        if (!isNaN(date.getTime())) {
+          year = date.getFullYear().toString()
+        }
+      }
+
+      const response = await api.get(`/etiquetas-provisorias/next-sequence?ano=${year}`)
+      if (response && response.formatted) {
+        setEditForm(prev => ({ ...prev, patrimonio: response.formatted }))
+        setPatrimonioGeneratedBySystem(true)
+        toast({
+          title: "Patrimônio Gerado",
+          description: `Novo código provisório: ${response.formatted}`,
+        })
+      }
+    } catch (error) {
+      console.error("Erro ao gerar provisório:", error)
+      toast({
+        title: "Erro",
+        description: "Não foi possível gerar o código provisório.",
+        variant: "destructive",
+      })
+    }
+  }
+
   const handleEditClick = (asset: any) => {
+    setIsCloning(false)
+    setPatrimonioGeneratedBySystem(false)
     setSelectedAsset(asset)
     setEditForm({
       patrimonio: asset.patrimonio,
@@ -208,10 +304,46 @@ export function BensList() {
       modelo: asset.modelo || "",
       valor: asset.valor ? asset.valor.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }) : "",
       imagem: asset.imagem || null,
+      notaFiscal: asset.notaFiscal || null,
       motivo_baixa: asset.motivo_baixa || "",
       tempo_garantia: asset.tempoGarantia ? String(asset.tempoGarantia) : "",
       numero_serie: asset.numeroSerie || asset.numero_serie || "",
       fornecedor: asset.fornecedor || "",
+      secretaria: asset.localizacao?.secretaria || "",
+      departamento: asset.localizacao?.departamento || "",
+      sala: asset.localizacao?.sala || "",
+      dataAquisicao: asset.dataAquisicao || "",
+      observacoes: asset.observacoes || "",
+      emendaParlamentar: asset.emendaParlamentar || "",
+    })
+    setShowEditDialog(true)
+  }
+
+  const handleDuplicateClick = (asset: any) => {
+    setIsCloning(true)
+    setPatrimonioGeneratedBySystem(false)
+    setSelectedAsset(asset)
+    setEditForm({
+      patrimonio: "", // Clear patrimonio for new asset
+      descricao: asset.descricao, // Keep description
+      categoria: asset.categoria,
+      grupo: asset.grupo || "",
+      status: "ativo", // Reset status to active
+      marca: asset.marca || "",
+      modelo: asset.modelo || "",
+      valor: asset.valor ? asset.valor.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }) : "",
+      imagem: asset.imagem || null,
+      notaFiscal: asset.notaFiscal || null,
+      motivo_baixa: "",
+      tempo_garantia: asset.tempoGarantia ? String(asset.tempoGarantia) : "",
+      numero_serie: "", // Clear serial number
+      fornecedor: asset.fornecedor || "",
+      secretaria: asset.localizacao?.secretaria || "",
+      departamento: asset.localizacao?.departamento || "",
+      sala: asset.localizacao?.sala || "",
+      dataAquisicao: asset.dataAquisicao || "",
+      observacoes: asset.observacoes || "",
+      emendaParlamentar: asset.emendaParlamentar || "",
     })
     setShowEditDialog(true)
   }
@@ -228,8 +360,28 @@ export function BensList() {
     e.target.value = ""
   }
 
+  const handlePdfChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (file.type !== "application/pdf") {
+      toast({
+        title: "Arquivo inválido",
+        description: "Por favor, selecione um arquivo PDF.",
+        variant: "destructive",
+      })
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      setEditForm(prev => ({ ...prev, notaFiscal: ev.target?.result as string }))
+    }
+    reader.readAsDataURL(file)
+    e.target.value = ""
+  }
+
   const handleSaveEdit = async () => {
     if (!selectedAsset) return
+    const patrimonioDigitado = editForm.patrimonio.trim()
     
     // Validation
     if (!editForm.descricao.trim()) {
@@ -250,39 +402,175 @@ export function BensList() {
       return
     }
 
+    if (!isCloning && !patrimonioDigitado) {
+      toast({
+        title: "Erro de validação",
+        description: "Informe um número de patrimônio para salvar o bem.",
+        variant: "destructive",
+      })
+      return
+    }
+
     setSaving(true)
     try {
-      await api.updateBem(selectedAsset.id, {
-        ...selectedAsset,
-        patrimonio: editForm.patrimonio,
-        descricao: editForm.descricao,
-        categoria: editForm.categoria, // Ensure this maps to slug if needed, but likely direct value
-        grupo: editForm.grupo,
-        status: editForm.status,
-        marca: editForm.marca,
-        modelo: editForm.modelo,
-        valor: parseCurrencyInput(editForm.valor),
-        imagem: editForm.imagem,
-        motivo_baixa: editForm.status === "baixado" ? editForm.motivo_baixa : null,
-        tempoGarantia: editForm.tempo_garantia ? parseInt(editForm.tempo_garantia) : null,
-        numeroSerie: editForm.numero_serie,
-        fornecedor: editForm.fornecedor,
-      })
-      await mutate() // Mutate list
-      globalMutate("/api/bens/grupos") // Mutate groups
-      
-      toast({
-        title: "Sucesso",
-        description: "Bem atualizado com sucesso!",
-      })
-      
+      if (isCloning) {
+        // If patrimonio is empty, generate a provisional one automatically
+        let finalPatrimonio = patrimonioDigitado;
+        let finalPatrimonioTipo = patrimonioDigitado
+          ? (patrimonioDigitado.startsWith("PROV-") || patrimonioDigitado.includes("AUTO") ? "provisorio" : "definitivo")
+          : "provisorio";
+        let patrimonioAutoGerado = patrimonioGeneratedBySystem
+
+        if (!finalPatrimonio) {
+            // Generate provisional code
+            let year = new Date().getFullYear().toString()
+            if (editForm.dataAquisicao) {
+                const date = new Date(editForm.dataAquisicao)
+                if (!isNaN(date.getTime())) {
+                    year = date.getFullYear().toString()
+                }
+            }
+            
+            try {
+                const response = await api.get(`/etiquetas-provisorias/next-sequence?ano=${year}`)
+                if (response && response.formatted) {
+                    finalPatrimonio = response.formatted;
+                    patrimonioAutoGerado = true
+                } else {
+                    throw new Error("Falha ao gerar sequencia provisoria");
+                }
+            } catch (err) {
+                console.error("Erro ao gerar sequencia automatica na duplicacao:", err);
+                toast({
+                    title: "Erro",
+                    description: "Nao foi possivel gerar o codigo provisorio automatico.",
+                    variant: "destructive"
+                });
+                setSaving(false);
+                return;
+            }
+        } else {
+          // Check if user manually typed a patrimonio that already exists
+          try {
+             // We use a specific check for existence before trying to create
+             const checkRes = await api.getBens(`patrimonio=${finalPatrimonio}`);
+             if (checkRes && checkRes.data && checkRes.data.length > 0) {
+                 toast({
+                    title: "Patrimônio Já Existe",
+                    description: "Este número de patrimônio já está cadastrado no sistema. Por favor, verifique se digitou corretamente ou utilize um outro número.",
+                    variant: "destructive",
+                    duration: 5000
+                 });
+                 setSaving(false);
+                 return;
+             }
+          } catch (e) {
+             // If check fails, we proceed and let the backend validation catch it
+             console.log("Pre-check failed, relying on backend validation", e);
+          }
+        }
+
+        // Create new asset
+        await api.createBem({
+          descricao: editForm.descricao,
+          categoria: editForm.categoria,
+          grupo: editForm.grupo,
+          status: editForm.status,
+          marca: editForm.marca,
+          modelo: editForm.modelo,
+          valor: parseCurrencyInput(editForm.valor),
+          imagem: editForm.imagem,
+          notaFiscal: editForm.notaFiscal,
+          tempoGarantia: editForm.tempo_garantia ? parseInt(editForm.tempo_garantia) : undefined,
+          numeroSerie: editForm.numero_serie,
+          fornecedor: editForm.fornecedor,
+          localizacao: {
+            secretaria: editForm.secretaria,
+            departamento: editForm.departamento,
+            sala: editForm.sala
+          },
+          responsavel: selectedAsset.responsavel, // Inherit responsible
+          dataAquisicao: editForm.dataAquisicao || new Date().toISOString().split('T')[0],
+          observacoes: editForm.observacoes,
+          patrimonioTipo: finalPatrimonioTipo,
+          patrimonio: finalPatrimonio,
+          emendaParlamentar: editForm.emendaParlamentar,
+          patrimonioAutoGerado,
+          ...(finalPatrimonioTipo === "provisorio" ? { patrimonioProvisorio: finalPatrimonio } : {})
+        })
+        
+        toast({
+            title: "Sucesso",
+            description: `Bem duplicado com sucesso! Codigo: ${finalPatrimonio}`,
+        })
+      } else {
+        // Update existing asset
+        const isProvisional = patrimonioDigitado.startsWith("PROV-") || patrimonioDigitado.includes("AUTO");
+        const isDefinitive = !isProvisional && patrimonioDigitado.length > 0;
+
+        await api.updateBem(selectedAsset.id, {
+          patrimonio: patrimonioDigitado,
+          ...(isProvisional
+            ? {
+                patrimonioTipo: "provisorio",
+                patrimonioProvisorio: patrimonioDigitado,
+              }
+            : {
+                patrimonioTipo: "definitivo",
+              }),
+          descricao: editForm.descricao,
+          categoria: editForm.categoria,
+          grupo: editForm.grupo,
+          status: editForm.status,
+          marca: editForm.marca,
+          modelo: editForm.modelo,
+          valor: parseCurrencyInput(editForm.valor),
+          imagem: editForm.imagem,
+          notaFiscal: editForm.notaFiscal,
+          motivo_baixa: editForm.status === "baixado" ? editForm.motivo_baixa : null,
+          tempoGarantia: editForm.tempo_garantia ? parseInt(editForm.tempo_garantia) : null,
+          numeroSerie: editForm.numero_serie,
+          fornecedor: editForm.fornecedor,
+          observacoes: editForm.observacoes,
+          emendaParlamentar: editForm.emendaParlamentar,
+          dataAquisicao: editForm.dataAquisicao || selectedAsset.dataAquisicao || null,
+          responsavel: {
+            nome: selectedAsset.responsavel?.nome || "",
+            cargo: selectedAsset.responsavel?.cargo || "",
+          },
+          localizacao: {
+            secretaria: editForm.secretaria,
+            departamento: editForm.departamento,
+            sala: editForm.sala,
+          },
+        })
+      }
+
       setShowEditDialog(false)
       setSelectedAsset(null)
-    } catch (err) {
-      console.error("Erro ao editar bem:", err)
+      setIsCloning(false)
+
+      if (!isCloning) {
+        toast({
+          title: "Sucesso",
+          description: "Bem atualizado com sucesso!",
+        })
+      }
+
+      void mutate().catch((refreshError) => {
+        console.error("Erro ao atualizar lista de bens apos salvar:", refreshError)
+      })
+      void globalMutate("/api/bens/grupos").catch((refreshError) => {
+        console.error("Erro ao atualizar grupos apos salvar bem:", refreshError)
+      })
+    } catch (err: any) {
+      console.error("Erro ao salvar bem:", err)
       toast({
-        title: "Erro ao salvar",
-        description: "Não foi possível atualizar o bem. Tente novamente.",
+        title: isApiError(err) && err.status === 409 ? "Patrimônio em uso" : "Erro ao salvar",
+        description:
+          isApiError(err) && err.status === 409 && err.body?.conflictingCode
+            ? `O patrimônio ${err.body.conflictingCode} já está em uso. Ajuste o número informado para salvar.`
+            : getApiErrorMessage(err, "Não foi possível salvar o bem. Tente novamente."),
         variant: "destructive",
       })
     } finally {
@@ -329,6 +617,38 @@ export function BensList() {
       })
     } finally {
       setIsDeleting(false)
+    }
+  }
+
+  const handleEtiquetaWorkflow = async (
+    asset: any,
+    action: "marcar_enviada" | "reabrir_pendente"
+  ) => {
+    setWorkflowLoadingId(String(asset.id))
+    try {
+      await api.updateBemEtiquetaFluxo(asset.id, action)
+      await mutate()
+
+      if (selectedAsset?.id === asset.id) {
+        const refreshedAsset = await api.getBem(asset.id)
+        setSelectedAsset(refreshedAsset)
+      }
+
+      toast({
+        title: "Sucesso",
+        description:
+          action === "marcar_enviada"
+            ? "Etiqueta enviada para a unidade com sucesso."
+            : "Fluxo de etiqueta removido com sucesso.",
+      })
+    } catch (error) {
+      toast({
+        title: "Erro",
+        description: getApiErrorMessage(error, "Nao foi possivel atualizar o fluxo da etiqueta."),
+        variant: "destructive",
+      })
+    } finally {
+      setWorkflowLoadingId(null)
     }
   }
 
@@ -388,6 +708,7 @@ export function BensList() {
     }
   }
 
+  /* Removed early return to prevent unmounting input
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -395,6 +716,7 @@ export function BensList() {
       </div>
     )
   }
+  */
 
   return (
     <div className="flex flex-col gap-6">
@@ -407,25 +729,44 @@ export function BensList() {
         </div>
       </div>
 
-      {(secretariaFilter || departamentoFilter) && (
+      {(secretariaFilter || departamentoFilter || salaFilter) && (
         <div className="flex items-center gap-2 bg-accent/20 p-2 rounded-md border border-accent/50 text-sm">
           <MapPin className="h-4 w-4 text-primary" />
           <span className="font-medium">Filtrado por:</span>
           {secretariaFilter && <Badge variant="outline" className="bg-background">{secretariaFilter}</Badge>}
           {departamentoFilter && (
             <>
-              <ArrowRightLeft className="h-3 w-3 text-muted-foreground" />
+              {secretariaFilter && <ArrowRightLeft className="h-3 w-3 text-muted-foreground" />}
               <Badge variant="outline" className="bg-background">{departamentoFilter}</Badge>
+            </>
+          )}
+          {salaFilter && (
+            <>
+              {(secretariaFilter || departamentoFilter) && <ArrowRightLeft className="h-3 w-3 text-muted-foreground" />}
+              <Badge variant="outline" className="bg-background">{salaFilter}</Badge>
             </>
           )}
           <Button 
             variant="ghost" 
             size="sm" 
             className="h-6 ml-auto text-muted-foreground hover:text-foreground"
-            onClick={() => router.push("/bens")}
+            onClick={() => {
+              setSearch("")
+              setStatusFilter("todos")
+              setGrupoFilter("")
+              setCategoriaFilter("todos")
+              setTipoFilter("todos")
+              setWarrantyFilter("todos")
+              setEmendaFilter("")
+              setSecretariaFilter("")
+              setDepartamentoFilter("")
+              setSalaFilter("")
+              setPage(1)
+              router.push("/bens")
+            }}
           >
             <X className="h-3 w-3 mr-1" />
-            Limpar Filtro
+            Limpar Filtros
           </Button>
         </div>
       )}
@@ -482,10 +823,11 @@ export function BensList() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="todos">Todas Categorias</SelectItem>
-                  <SelectItem value="informatica">Informatica</SelectItem>
-                  <SelectItem value="movel">Movel</SelectItem>
-                  <SelectItem value="equipamento">Equipamento</SelectItem>
-                  <SelectItem value="eletronico">Eletronico</SelectItem>
+                  {categoriasList.map((cat: any) => (
+                    <SelectItem key={cat.id} value={cat.slug}>
+                      {cat.nome}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
 
@@ -510,6 +852,57 @@ export function BensList() {
                   <SelectItem value="fora_garantia">Fora de Garantia</SelectItem>
                 </SelectContent>
               </Select>
+
+              <div className="w-56">
+                <SearchableSelect
+                  items={availableDepartamentos.map((d: any) => ({ value: d.nome, label: d.nome }))}
+                  value={departamentoFilter}
+                  onValueChange={(v) => { setDepartamentoFilter(v); setSalaFilter(""); setPage(1); }}
+                  placeholder="Filtrar Departamento"
+                />
+              </div>
+
+              <div className="w-56">
+                <SearchableSelect
+                  items={availableSalas.map((s: any) => ({ value: s.nome, label: s.nome }))}
+                  value={salaFilter}
+                  onValueChange={(v) => { setSalaFilter(v); setPage(1); }}
+                  placeholder="Filtrar Sala"
+                />
+              </div>
+
+              <div className="w-48">
+                <Input 
+                    placeholder="Filtrar Emenda..." 
+                    value={emendaFilter}
+                    onChange={(e) => { setEmendaFilter(e.target.value); setPage(1); }}
+                    className="h-10"
+                />
+              </div>
+
+              {(search || statusFilter !== "todos" || grupoFilter || categoriaFilter !== "todos" || tipoFilter !== "todos" || warrantyFilter !== "todos" || emendaFilter || secretariaFilter || departamentoFilter || salaFilter) ? (
+                <Button 
+                  variant="outline" 
+                  onClick={() => {
+                    setSearch("")
+                    setStatusFilter("todos")
+                    setGrupoFilter("")
+                    setCategoriaFilter("todos")
+                    setTipoFilter("todos")
+                    setWarrantyFilter("todos")
+                    setEmendaFilter("")
+                    setSecretariaFilter("")
+                    setDepartamentoFilter("")
+                    setSalaFilter("")
+                    setPage(1)
+                    router.push("/bens")
+                  }}
+                  className="h-10 gap-2"
+                >
+                  <X className="h-4 w-4" />
+                  Limpar Filtros
+                </Button>
+              ) : null}
             </div>
           </div>
         </CardContent>
@@ -517,8 +910,14 @@ export function BensList() {
 
       <Card>
         <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <Table>
+          {isLoading && bens.length === 0 ? (
+            <div className="flex items-center justify-center h-64">
+              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <div className="min-w-[1000px]">
+              <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-[50px]">
@@ -611,9 +1010,16 @@ export function BensList() {
                       <span className="text-sm">{asset.responsavel?.nome}</span>
                     </TableCell>
                     <TableCell>
-                      <Badge className={`text-xs ${getStatusColor(asset.status)}`}>
-                        {getStatusLabel(asset.status)}
-                      </Badge>
+                      <div className="flex flex-col items-start gap-1">
+                        <Badge className={`text-xs ${getStatusColor(asset.status)}`}>
+                          {getStatusLabel(asset.status)}
+                        </Badge>
+                        {asset.etiquetaStatus === "enviada" && (
+                          <Badge variant="outline" className={`text-[10px] ${getEtiquetaStatusColor(asset.etiquetaStatus)}`}>
+                            {getEtiquetaStatusLabel(asset.etiquetaStatus)}
+                          </Badge>
+                        )}
+                      </div>
                     </TableCell>
                     {statusFilter === "baixado" && (
                       <TableCell>
@@ -633,6 +1039,18 @@ export function BensList() {
                           <Eye className="h-4 w-4" />
                           <span className="sr-only">Ver detalhes</span>
                         </Button>
+                        {hasPermission("cadastrarBem") && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-primary"
+                            onClick={() => handleDuplicateClick(asset)}
+                            title="Duplicar Bem"
+                          >
+                            <Copy className="h-4 w-4" />
+                            <span className="sr-only">Duplicar Bem</span>
+                          </Button>
+                        )}
                         {hasPermission("atribuirPatrimonioDefinitivo") && (
                           <Button
                             variant="ghost"
@@ -668,7 +1086,9 @@ export function BensList() {
                 )}
               </TableBody>
             </Table>
+            </div>
           </div>
+          )}
         </CardContent>
       </Card>
 
@@ -731,29 +1151,37 @@ export function BensList() {
 
       {/* Asset Detail Dialog */}
       <Dialog open={!!selectedAsset && !showEditDialog} onOpenChange={(open) => !open && setSelectedAsset(null)}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-2xl h-[90vh] flex flex-col p-0 gap-0">
           {selectedAsset && (
             <>
-              <DialogHeader>
-                <DialogTitle className="text-lg">{selectedAsset.descricao}</DialogTitle>
-                <DialogDescription className="sr-only">Detalhes do bem patrimonial</DialogDescription>
-                <div className="flex items-center gap-3">
-                  <Badge className={`${getStatusColor(selectedAsset.status)} text-xs`}>
-                    {getStatusLabel(selectedAsset.status)}
-                  </Badge>
-                </div>
-              </DialogHeader>
+              <div className="p-6 pb-2">
+                <DialogHeader>
+                  <DialogTitle className="text-lg pr-8">{selectedAsset.descricao}</DialogTitle>
+                  <DialogDescription className="sr-only">Detalhes do bem patrimonial</DialogDescription>
+                  <div className="flex items-center gap-3 mt-2">
+                    <Badge className={`${getStatusColor(selectedAsset.status)} text-xs`}>
+                      {getStatusLabel(selectedAsset.status)}
+                    </Badge>
+                    {selectedAsset.etiquetaStatus && (
+                      <Badge variant="outline" className={`text-xs ${getEtiquetaStatusColor(selectedAsset.etiquetaStatus)}`}>
+                        {getEtiquetaStatusLabel(selectedAsset.etiquetaStatus)}
+                      </Badge>
+                    )}
+                  </div>
+                </DialogHeader>
+              </div>
 
-              <Tabs defaultValue="detalhes" className="mt-2">
-                <TabsList>
-                  <TabsTrigger value="detalhes">Detalhes</TabsTrigger>
-                  <TabsTrigger value="historico">Historico</TabsTrigger>
-                </TabsList>
+              <div className="flex-1 overflow-y-auto px-6 py-4">
+                <Tabs defaultValue="detalhes" className="w-full">
+                  <TabsList className="w-full justify-start">
+                    <TabsTrigger value="detalhes">Detalhes</TabsTrigger>
+                    <TabsTrigger value="historico">Historico</TabsTrigger>
+                  </TabsList>
 
-                <TabsContent value="detalhes" className="mt-4">
-                  {/* Asset Image Banner */}
-                  <div className="mb-6 rounded-lg border bg-muted/30 p-2 flex justify-center">
-                    {selectedAsset.imagem ? (
+                  <TabsContent value="detalhes" className="mt-4">
+                    {/* Asset Image Banner */}
+                    <div className="mb-6 rounded-lg border bg-muted/30 p-2 flex justify-center">
+                      {selectedAsset.imagem ? (
                       <img 
                         src={selectedAsset.imagem} 
                         alt={selectedAsset.descricao}
@@ -834,10 +1262,32 @@ export function BensList() {
                           )}
                         </div>
                       </div>
-                      {selectedAsset.marca && (
+                      <div className="flex items-start gap-3">
+                        <Upload className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
                         <div>
-                          <p className="text-xs text-muted-foreground">Marca / Modelo</p>
-                          <p className="text-sm font-medium">{selectedAsset.marca} {selectedAsset.modelo}</p>
+                          <p className="text-xs text-muted-foreground">Nota Fiscal</p>
+                          {selectedAsset.notaFiscal ? (
+                             <a 
+                                href={selectedAsset.notaFiscal} 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                                className="text-sm font-medium text-primary hover:underline flex items-center gap-1"
+                             >
+                               <Download className="h-3 w-3" />
+                               Baixar PDF
+                             </a>
+                          ) : (
+                             <p className="text-sm font-medium text-muted-foreground">-</p>
+                          )}
+                        </div>
+                      </div>
+                      {selectedAsset.marca && (
+                        <div className="flex items-start gap-3">
+                          <Tag className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+                          <div>
+                            <p className="text-xs text-muted-foreground">Marca / Modelo</p>
+                            <p className="text-sm font-medium">{selectedAsset.marca} {selectedAsset.modelo}</p>
+                          </div>
                         </div>
                       )}
                       {selectedAsset.numeroSerie && (
@@ -852,8 +1302,79 @@ export function BensList() {
                           <p className="text-sm font-medium">{selectedAsset.estadoConservacao}</p>
                         </div>
                       )}
+                      {selectedAsset.emendaParlamentar && (
+                        <div>
+                          <p className="text-xs text-muted-foreground">Emenda Parlamentar</p>
+                          <p className="text-sm font-medium">{selectedAsset.emendaParlamentar}</p>
+                        </div>
+                      )}
+                      {selectedAsset.etiquetaStatus && (
+                        <div>
+                          <p className="text-xs text-muted-foreground">Fluxo da Etiqueta</p>
+                          <div className="mt-1 space-y-1">
+                            <Badge variant="outline" className={`text-[10px] ${getEtiquetaStatusColor(selectedAsset.etiquetaStatus)}`}>
+                              {getEtiquetaStatusLabel(selectedAsset.etiquetaStatus)}
+                            </Badge>
+                            {selectedAsset.etiquetaEnviadaPor && (
+                              <p className="text-xs text-muted-foreground">
+                                Enviada por {selectedAsset.etiquetaEnviadaPor}
+                                {selectedAsset.etiquetaEnviadaEm ? ` em ${formatDate(selectedAsset.etiquetaEnviadaEm)}` : ""}
+                              </p>
+                            )}
+                            {selectedAsset.etiquetaColadaPor && (
+                              <p className="text-xs text-muted-foreground">
+                                Colagem confirmada por {selectedAsset.etiquetaColadaPor}
+                                {selectedAsset.etiquetaColadaEm ? ` em ${formatDate(selectedAsset.etiquetaColadaEm)}` : ""}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                      {(user?.role === "gestor" || user?.role === "administrador") && selectedAsset.patrimonioTipo !== "provisorio" && !selectedAsset.etiquetaStatus && (
+                        <div className="rounded-lg border border-info/30 bg-info/5 p-3">
+                          <p className="text-xs text-muted-foreground">
+                            Inicie este fluxo apenas quando a etiqueta for enviada para a unidade colar e confirmar.
+                          </p>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="mt-3 gap-2"
+                            onClick={() => handleEtiquetaWorkflow(selectedAsset, "marcar_enviada")}
+                            disabled={workflowLoadingId === String(selectedAsset.id)}
+                          >
+                            {workflowLoadingId === String(selectedAsset.id) ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                            Enviar etiqueta para unidade
+                          </Button>
+                        </div>
+                      )}
+                      {(user?.role === "gestor" || user?.role === "administrador") && selectedAsset.etiquetaStatus && (
+                        <div className="rounded-lg border border-border/60 bg-muted/30 p-3">
+                          <p className="text-xs text-muted-foreground">
+                            Se este bem nao depende mais da unidade, voce pode remover este fluxo de confirmacao.
+                          </p>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="mt-3 gap-2"
+                            onClick={() => handleEtiquetaWorkflow(selectedAsset, "reabrir_pendente")}
+                            disabled={workflowLoadingId === String(selectedAsset.id)}
+                          >
+                            {workflowLoadingId === String(selectedAsset.id) ? <Loader2 className="h-4 w-4 animate-spin" /> : <Clock className="h-4 w-4" />}
+                            Limpar fluxo de etiqueta
+                          </Button>
+                        </div>
+                      )}
                     </div>
                   </div>
+
+                  {selectedAsset.observacoes && (
+                    <div className="mt-6">
+                      <p className="text-xs text-muted-foreground mb-1">Observações</p>
+                      <div className="rounded-md bg-muted/50 p-3 text-sm">
+                        {selectedAsset.observacoes}
+                      </div>
+                    </div>
+                  )}
 
                   {selectedAsset.patrimonioTipo === "provisorio" && hasPermission("atribuirPatrimonioDefinitivo") && (
                     <div className="mt-6 rounded-lg border border-warning/30 bg-warning/5 p-4">
@@ -898,6 +1419,7 @@ export function BensList() {
                   )}
                 </TabsContent>
               </Tabs>
+            </div>
             </>
           )}
         </DialogContent>
@@ -907,29 +1429,55 @@ export function BensList() {
       <Dialog open={showEditDialog} onOpenChange={(open) => {
         if (!open) { setShowEditDialog(false); }
       }}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Editar Bem Patrimonial</DialogTitle>
-            <DialogDescription>
-              Faça as alterações necessárias nos dados do bem.
-            </DialogDescription>
-          </DialogHeader>
-          {selectedAsset && (
-            <div className="flex flex-col gap-6 mt-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="flex flex-col gap-4">
+        <DialogContent className="max-w-6xl h-[90vh] flex flex-col p-0 gap-0">
+          <div className="p-6 pb-4 border-b">
+            <DialogHeader>
+              <DialogTitle>{isCloning ? "Duplicar Bem Patrimonial" : "Editar Bem Patrimonial"}</DialogTitle>
+              <DialogDescription>
+                {isCloning 
+                  ? "Crie uma cópia deste bem. O número de patrimônio deve ser único." 
+                  : "Faça as alterações necessárias nos dados do bem."}
+              </DialogDescription>
+            </DialogHeader>
+          </div>
+          
+          <div className="flex-1 overflow-y-auto px-6 py-6">
+            {selectedAsset && (
+              <div className="flex flex-col gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="flex flex-col gap-4">
                    
                    {/* Linha 1: Patrimonio e Descricao */}
                    <div className="grid grid-cols-12 gap-4">
-                     <div className="col-span-12 md:col-span-4 flex flex-col gap-2">
+                     <div className="col-span-12 md:col-span-5 flex flex-col gap-2">
                        <Label htmlFor="edit-patrimonio">Patrimonio</Label>
-                       <Input 
-                         id="edit-patrimonio" 
-                         value={editForm.patrimonio} 
-                         onChange={(e) => setEditForm({...editForm, patrimonio: e.target.value})}
-                       />
+                       <div className="flex gap-2">
+                         <Input 
+                           id="edit-patrimonio" 
+                           value={editForm.patrimonio} 
+                           onChange={(e) => {
+                             setEditForm({...editForm, patrimonio: e.target.value})
+                             setPatrimonioGeneratedBySystem(false)
+                           }}
+                           placeholder={isCloning ? "Deixe vazio para gerar provisório automático" : "Informe o patrimônio do bem"}
+                         />
+                         <Button 
+                           type="button" 
+                           variant="outline" 
+                           size="icon" 
+                           onClick={handleGenerateProvisional}
+                           title="Gerar Provisório"
+                         >
+                           <Clock className="h-4 w-4" />
+                         </Button>
+                       </div>
+                       <p className="text-xs text-muted-foreground">
+                         {isCloning
+                           ? "Se deixar em branco, o sistema cria a cópia com patrimônio provisório automático. Se preencher, o número precisa ser único."
+                           : "Você pode alterar o número do patrimônio, desde que ele não esteja em uso por outro bem."}
+                       </p>
                      </div>
-                     <div className="col-span-12 md:col-span-8 flex flex-col gap-2">
+                     <div className="col-span-12 md:col-span-7 flex flex-col gap-2">
                        <Label htmlFor="edit-descricao">Descricao</Label>
                        <Input 
                          id="edit-descricao" 
@@ -1008,20 +1556,20 @@ export function BensList() {
                      <div className="flex flex-col gap-2">
                        <Label htmlFor="edit-categoria">Categoria</Label>
                        <Select 
-                         value={editForm.categoria} 
-                         onValueChange={(v) => setEditForm({...editForm, categoria: v})}
-                       >
-                         <SelectTrigger id="edit-categoria">
-                           <SelectValue placeholder="Selecione" />
-                         </SelectTrigger>
-                         <SelectContent>
-                            <SelectItem value="informatica">Informatica</SelectItem>
-                            <SelectItem value="movel">Movel</SelectItem>
-                            <SelectItem value="equipamento">Equipamento</SelectItem>
-                            <SelectItem value="eletronico">Eletronico</SelectItem>
-                            <SelectItem value="veiculo">Veiculo</SelectItem>
-                         </SelectContent>
-                       </Select>
+                        value={editForm.categoria} 
+                        onValueChange={(v) => setEditForm({...editForm, categoria: v})}
+                      >
+                        <SelectTrigger id="edit-categoria">
+                          <SelectValue placeholder="Selecione" />
+                        </SelectTrigger>
+                        <SelectContent>
+                           {categoriasList.map((cat: any) => (
+                             <SelectItem key={cat.id} value={cat.slug}>
+                               {cat.nome}
+                             </SelectItem>
+                           ))}
+                        </SelectContent>
+                      </Select>
                      </div>
 
                      <div className="flex flex-col gap-2">
@@ -1061,6 +1609,63 @@ export function BensList() {
                          onChange={(e) => setEditForm({...editForm, motivo_baixa: e.target.value})}
                          placeholder="Descreva o motivo da baixa..."
                        />
+                     </div>
+                   )}
+
+                   {/* Linha 7: Observações e Emenda */}
+                   <div className="flex flex-col gap-2 col-span-1 md:col-span-2">
+                     <Label htmlFor="edit-observacoes">Observações</Label>
+                     <Textarea
+                       id="edit-observacoes"
+                       value={editForm.observacoes}
+                       onChange={(e) => setEditForm({...editForm, observacoes: e.target.value})}
+                       placeholder="Observações adicionais..."
+                       className="min-h-[80px]"
+                     />
+                   </div>
+                   
+                   <div className="flex flex-col gap-2 col-span-1 md:col-span-2">
+                     <Label htmlFor="edit-emenda">Emenda Parlamentar</Label>
+                     <Input
+                       id="edit-emenda"
+                       value={editForm.emendaParlamentar}
+                       onChange={(e) => setEditForm({...editForm, emendaParlamentar: e.target.value})}
+                       placeholder="Ex: Emenda nº 123/2025"
+                     />
+                   </div>
+
+                   {/* Linha 8: Localização (Apenas na Duplicação) */}
+                   {isCloning && (
+                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-2">
+                       <div className="flex flex-col gap-2 col-span-1 md:col-span-2">
+                         <Label>Secretaria</Label>
+                         <SearchableSelect
+                           items={secretariasList.map((s: any) => ({ value: s.nome, label: s.nome }))}
+                           value={editForm.secretaria}
+                           onValueChange={(v) => setEditForm({ ...editForm, secretaria: v, departamento: "", sala: "" })}
+                           placeholder="Selecione a secretaria"
+                         />
+                       </div>
+                       <div className="flex flex-col gap-2 col-span-1">
+                         <Label>Departamento</Label>
+                         <SearchableSelect
+                           items={departamentosList.map((d: any) => ({ value: d.nome, label: d.nome }))}
+                           value={editForm.departamento}
+                           onValueChange={(v) => setEditForm({ ...editForm, departamento: v, sala: "" })}
+                           placeholder="Selecione o departamento"
+                           disabled={!editForm.secretaria}
+                         />
+                       </div>
+                       <div className="flex flex-col gap-2 col-span-1">
+                         <Label>Sala</Label>
+                         <SearchableSelect
+                           items={salasList.map((s: any) => ({ value: s.nome, label: s.nome }))}
+                           value={editForm.sala}
+                           onValueChange={(v) => setEditForm({ ...editForm, sala: v })}
+                           placeholder="Selecione a sala"
+                           disabled={!editForm.departamento}
+                         />
+                       </div>
                      </div>
                    )}
                 </div>
@@ -1107,20 +1712,58 @@ export function BensList() {
                       Alterar Foto
                     </Button>
                   </div>
+
+                  <div className="flex flex-col gap-2 mt-2">
+                    <Label>Anexar Nota Fiscal (PDF)</Label>
+                    <div className="flex items-center gap-2">
+                         <input 
+                            ref={pdfInputRef}
+                            type="file" 
+                            accept="application/pdf" 
+                            className="hidden" 
+                            onChange={handlePdfChange}
+                         />
+                         <Button
+                            variant="outline"
+                            size="sm"
+                            className="w-full"
+                            onClick={() => pdfInputRef.current?.click()}
+                         >
+                            <Upload className="h-4 w-4 mr-2" />
+                            {editForm.notaFiscal ? "Alterar PDF" : "Selecionar PDF"}
+                         </Button>
+                         {editForm.notaFiscal && (
+                            <Button
+                                variant="destructive"
+                                size="icon"
+                                onClick={() => setEditForm({...editForm, notaFiscal: null})}
+                            >
+                                <X className="h-4 w-4" />
+                            </Button>
+                         )}
+                    </div>
+                    {editForm.notaFiscal && (
+                        <p className="text-xs text-green-600 flex items-center gap-1">
+                            <CheckCircle2 className="h-3 w-3" />
+                            PDF Anexado
+                        </p>
+                    )}
+                  </div>
                 </div>
               </div>
-
-              <div className="flex justify-end gap-2 mt-4">
-                <Button variant="outline" onClick={() => setShowEditDialog(false)}>
-                  Cancelar
-                </Button>
-                <Button onClick={handleSaveEdit} disabled={saving} className="gap-2">
-                  {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-                  Salvar Alteracoes
-                </Button>
-              </div>
             </div>
-          )}
+            )}
+          </div>
+
+          <div className="p-4 border-t bg-background mt-auto flex justify-end gap-2 z-10">
+            <Button variant="outline" onClick={() => setShowEditDialog(false)}>
+              Cancelar
+            </Button>
+            <Button onClick={handleSaveEdit} disabled={saving} className="gap-2">
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              {isCloning ? "Criar Cópia" : "Salvar Alteracoes"}
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
 

@@ -37,9 +37,9 @@ interface SearchableSelectProps {
 }
 
 export function SearchableSelect({
-  items,
   value,
   onValueChange,
+  items,
   placeholder = "Selecione...",
   searchPlaceholder = "Buscar...",
   emptyMessage = "Nenhum item encontrado.",
@@ -61,10 +61,12 @@ export function SearchableSelect({
           variant="outline"
           role="combobox"
           aria-expanded={open}
-          className={cn("w-full justify-between font-normal", !value && "text-muted-foreground", className)}
+          className={cn("w-full justify-between", className)}
           disabled={disabled}
         >
-          {selectedItem ? selectedItem.label : placeholder}
+          {value
+            ? items.find((item) => item.value === value)?.label || value
+            : placeholder}
           <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
         </Button>
       </PopoverTrigger>
