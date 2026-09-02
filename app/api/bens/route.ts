@@ -10,6 +10,7 @@ import { ensureEtiquetasSchema } from "@/lib/etiquetas-schema"
 import { getEtiquetaSequenceInfo } from "@/lib/etiquetas-sequence"
 import { getEffectivePermissionsForUser } from "@/lib/auth-utils"
 import { ensureAssetLabelWorkflowSchema } from "@/lib/asset-label-workflow-schema"
+import { buildSmartSearch } from "@/lib/smart-search"
 
 type PatrimonioConflictRecord = {
   id?: number
@@ -592,9 +593,9 @@ export const GET = withAuth(async (request, { user }) => {
   }
 
   if (busca) {
-    whereClause += " AND (patrimonio LIKE ? OR descricao LIKE ? OR responsavel_nome LIKE ? OR marca LIKE ? OR modelo LIKE ? OR numero_serie LIKE ? OR localizacao_secretaria LIKE ? OR emenda_parlamentar LIKE ?)"
-    const term = `%${busca}%`
-    params.push(term, term, term, term, term, term, term, term)
+    const smart = buildSmartSearch(["patrimonio", "patrimonio_provisorio", "descricao", "responsavel_nome", "marca", "modelo", "numero_serie", "localizacao_secretaria", "localizacao_departamento", "localizacao_sala", "emenda_parlamentar"], busca)
+    whereClause += ` AND ${smart.clause}`
+    params.push(...smart.params)
   }
 
   const countSql = `SELECT COUNT(*) as total FROM bens ${whereClause}`

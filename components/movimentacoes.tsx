@@ -771,7 +771,7 @@ export function Movimentacoes() {
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
-                    placeholder="Buscar por patrimonio, descricao, responsavel, motivo, origem ou destino..."
+                              placeholder="Patrimonio completo, ultimos numeros, descricao, origem ou destino..."
                     className="pl-9"
                     value={search}
                     onChange={(e) => { setSearch(e.target.value); setPage(1) }}

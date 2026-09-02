@@ -3,6 +3,7 @@ import { execute, query, queryOne } from "./db"
 import { getEtiquetaSequenceInfo } from "./etiquetas-sequence"
 import type { ScopedDbUser } from "./auth-utils"
 import { ensureCadastrosProvisoriosSchema } from "./cadastros-provisorios-schema"
+import { buildSmartSearch } from "./smart-search"
 
 export type CadastroProvisorioStatus =
   | "rascunho"
@@ -240,9 +241,9 @@ export async function listCadastrosProvisorios(user: ScopedDbUser, filters?: Rec
   }
 
   if (filters?.search) {
-    const search = `%${escapeLike(filters.search)}%`
-    whereClauses.push("(codigo LIKE ? ESCAPE '\\' OR descricao LIKE ? ESCAPE '\\' OR numero_serie LIKE ? ESCAPE '\\' OR solicitante_nome LIKE ? ESCAPE '\\')")
-    params.push(search, search, search, search)
+    const smart = buildSmartSearch(["codigo", "descricao", "numero_serie", "solicitante_nome", "origem_secretaria", "origem_departamento", "origem_sala"], filters.search)
+    whereClauses.push(smart.clause)
+    params.push(...smart.params)
   }
 
   if (user.role === "gestor" && user.secretariasGerenciadas?.length) {

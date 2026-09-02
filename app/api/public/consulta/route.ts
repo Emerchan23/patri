@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { query } from "@/lib/db"
 import crypto from "crypto"
 import { cacheGetJson, cacheSetJson, checkRateLimit } from "@/lib/redis-tools"
+import { normalizeSmartSearch } from "@/lib/smart-search"
 
 function getClientIp(request: Request) {
   const xff = request.headers.get("x-forwarded-for")
@@ -120,6 +121,33 @@ export async function GET(request: Request) {
     ) as any[]
     
     if (bemRes.length > 0) bem = bemRes[0]
+
+    // Accept codes typed without punctuation or case differences.
+    if (!bem) {
+      const normalized = normalizeSmartSearch(buscaTrim)
+      if (normalized) {
+        bemRes = await query(
+          `SELECT * FROM bens WHERE
+           UPPER(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(patrimonio, ''), '-', ''), ' ', ''), '.', ''), '/', '')) = ?
+           OR UPPER(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(patrimonio_provisorio, ''), '-', ''), ' ', ''), '.', ''), '/', '')) = ?`,
+          [normalized, normalized]
+        ) as any[]
+        if (bemRes.length === 1) bem = bemRes[0]
+      }
+    }
+
+    // Short numeric searches are direct only when they identify one asset.
+    if (!bem && /^\d+$/.test(buscaTrim)) {
+      const digits = buscaTrim.replace(/^0+/, "") || "0"
+      bemRes = await query(
+        `SELECT * FROM bens WHERE
+         UPPER(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(patrimonio, ''), '-', ''), ' ', ''), '.', ''), '/', '')) LIKE ?
+         OR UPPER(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(patrimonio_provisorio, ''), '-', ''), ' ', ''), '.', ''), '/', '')) LIKE ?
+         LIMIT 20`,
+        [`%${digits}`, `%${digits}`]
+      ) as any[]
+      if (bemRes.length === 1) bem = bemRes[0]
+    }
 
     // Strategy 2: If numeric, try matching without leading zeros (e.g. scanner sends 00123, db has 123)
     if (!bem && buscaTrim !== buscaSemZeros) {

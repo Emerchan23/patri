@@ -430,7 +430,7 @@ export function CadastrosProvisoriosPage() {
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-5">
             <div className="lg:col-span-2">
               <Label>Buscar</Label>
-              <Input placeholder="Código, descrição, série ou solicitante..." value={search} onChange={(e) => setSearch(e.target.value)} />
+              <Input placeholder="Código completo, ultimos numeros, descricao, serie ou solicitante..." value={search} onChange={(e) => setSearch(e.target.value)} />
             </div>
             <div>
               <Label>Status</Label>

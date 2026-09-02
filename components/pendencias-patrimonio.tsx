@@ -649,7 +649,7 @@ export function PendenciasPatrimonio() {
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
-                placeholder="Buscar por descricao, patrimonio provisorio, responsavel..."
+                placeholder="Patrimonio completo, ultimos numeros, descricao, serie ou responsavel..."
                 className="pl-9"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}

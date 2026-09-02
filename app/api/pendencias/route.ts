@@ -3,6 +3,7 @@ import { query } from "@/lib/db"
 import { verifyAuth } from "@/lib/api-auth"
 import { appendScopeClause, getAssetScopeClause, getTransferScopeClause } from "@/lib/asset-scope"
 import { ensureAssetLabelWorkflowSchema } from "@/lib/asset-label-workflow-schema"
+import { buildSmartSearch } from "@/lib/smart-search"
 
 function normalizePage(value: string | null, fallback: number) {
   const parsed = Number(value)
@@ -58,14 +59,9 @@ export async function GET(req: NextRequest) {
   let dataWhere = baseWhere
   const dataParams = [...baseParams]
   if (search) {
-    dataWhere += ` AND (
-      descricao LIKE ?
-      OR patrimonio LIKE ?
-      OR patrimonio_provisorio LIKE ?
-      OR responsavel_nome LIKE ?
-    )`
-    const like = `%${search}%`
-    dataParams.push(like, like, like, like)
+    const smart = buildSmartSearch(["descricao", "patrimonio", "patrimonio_provisorio", "responsavel_nome", "localizacao_secretaria", "localizacao_departamento", "localizacao_sala"], search)
+    dataWhere += ` AND ${smart.clause}`
+    dataParams.push(...smart.params)
   }
 
   const [rows, countResult, statsResult, pendingList, semLocal, mauEstado, atrasados] = await Promise.all([

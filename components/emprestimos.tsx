@@ -323,7 +323,7 @@ export function Emprestimos() {
         <CardContent className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-[minmax(280px,1.4fr)_180px_1fr_1fr_1fr]">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input placeholder="Buscar por bem, patrimonio, secretaria, responsavel..." value={searchTerm} onChange={(e) => { setSearchTerm(e.target.value); setPage(1); }} className="pl-9" />
+            <Input placeholder="Patrimonio completo, numeros, bem, sala ou responsavel..." value={searchTerm} onChange={(e) => { setSearchTerm(e.target.value); setPage(1); }} className="pl-9" />
           </div>
           <Select value={filterStatus} onValueChange={(v) => { setFilterStatus(v); setPage(1); }}>
             <SelectTrigger className="w-full sm:w-48"><SelectValue placeholder="Status" /></SelectTrigger>

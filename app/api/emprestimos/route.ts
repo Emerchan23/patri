@@ -5,6 +5,7 @@ import { registrarLog } from "@/lib/audit"
 import { criarNotificacao } from "@/lib/notifications"
 import { appendScopeClause, assertAssetAccess, getTransferScopeClause, isLocationInScope } from "@/lib/asset-scope"
 import { ensureTermosResponsabilidadeSchema } from "@/lib/termos-responsabilidade-schema"
+import { buildSmartSearch } from "@/lib/smart-search"
 
 // GET /api/emprestimos
 export const GET = withAuth(async (request, { user }) => {
@@ -51,9 +52,9 @@ export const GET = withAuth(async (request, { user }) => {
   }
 
   if (busca) {
-    whereClause += " AND (e.bem_descricao LIKE ? OR e.patrimonio LIKE ? OR e.destino_secretaria LIKE ? OR e.responsavel_recebimento LIKE ?)"
-    const term = `%${busca}%`
-    params.push(term, term, term, term)
+    const smart = buildSmartSearch(["e.bem_descricao", "e.patrimonio", "e.origem_secretaria", "e.origem_departamento", "e.origem_sala", "e.destino_secretaria", "e.destino_departamento", "e.destino_sala", "e.responsavel_recebimento"], busca)
+    whereClause += ` AND ${smart.clause}`
+    params.push(...smart.params)
   }
 
   // Count total records and stats
