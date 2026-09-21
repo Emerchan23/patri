@@ -25,9 +25,21 @@ async function shouldUseSecureAuthCookie(): Promise<boolean> {
   if (configuredValue === "false") return false
 
   const requestHeaders = await headers()
-  const forwardedProtocol = requestHeaders.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase()
+  const forwardedProtocol = [
+    requestHeaders.get("x-forwarded-proto"),
+    requestHeaders.get("x-forwarded-protocol"),
+    requestHeaders.get("x-url-scheme"),
+  ]
+    .find(Boolean)
+    ?.split(",")[0]
+    ?.trim()
+    .toLowerCase()
+  const forwardedSsl = [requestHeaders.get("x-forwarded-ssl"), requestHeaders.get("front-end-https")]
+    .find(Boolean)
+    ?.trim()
+    .toLowerCase()
 
-  return forwardedProtocol === "https"
+  return forwardedProtocol === "https" || forwardedSsl === "on"
 }
 
 export type AuthSessionChannel = "web" | "mobile"
