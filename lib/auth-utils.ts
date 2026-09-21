@@ -1,7 +1,7 @@
 import bcrypt from "bcryptjs"
 import crypto from "crypto"
 import jwt from "jsonwebtoken"
-import { cookies } from "next/headers"
+import { cookies, headers } from "next/headers"
 import { query, queryOne, execute } from "./db"
 import { isTokenBlacklisted } from "./redis-tools"
 import { ensureUserScopeSchema } from "./user-scope-schema"
@@ -11,6 +11,24 @@ const DEFAULT_JWT_SECRET = "sispatrimonio-secret-key-2025-change-in-production"
 const COOKIE_NAME = "sispatrimonio_token"
 const WEB_SESSION_MAX_AGE_SECONDS = 3 * 24 * 60 * 60
 const MOBILE_SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+
+/**
+ * Cookies marked as Secure are discarded by browsers when the system is
+ * accessed through HTTP. AUTH_COOKIE_SECURE always takes precedence; without
+ * it, infer the protocol from the request so the same image works on HTTP
+ * installations and remains secure behind an HTTPS proxy.
+ */
+async function shouldUseSecureAuthCookie(): Promise<boolean> {
+  const configuredValue = process.env.AUTH_COOKIE_SECURE?.trim().toLowerCase()
+
+  if (configuredValue === "true") return true
+  if (configuredValue === "false") return false
+
+  const requestHeaders = await headers()
+  const forwardedProtocol = requestHeaders.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase()
+
+  return forwardedProtocol === "https"
+}
 
 export type AuthSessionChannel = "web" | "mobile"
 
@@ -124,7 +142,7 @@ export async function setAuthCookie(
 
   cookieStore.set(COOKIE_NAME, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: await shouldUseSecureAuthCookie(),
     sameSite: "lax",
     path: "/",
     maxAge,
