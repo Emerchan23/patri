@@ -121,51 +121,91 @@ export const GET = withAuth(async (request, { user }) => {
 // POST /api/movimentacoes
 export const POST = withPermission("registrarMovimentacao", async (request, { user }) => {
   const body = await request.json()
-  if (body.assetId) {
-    try {
-      await assertAssetAccess(user, body.assetId)
-    } catch {
-      return NextResponse.json({ error: "Sem permissao para movimentar este bem" }, { status: 403 })
-    }
-  }
   if (!isLocationInScope(user, body.para)) {
     return NextResponse.json({ error: "Sem permissao para movimentar bem para este destino" }, { status: 403 })
   }
 
-  const result = await withTransaction(async (connection) => {
-    return registrarMovimentacaoInterna(connection, {
-      assetId: body.assetId,
-      assetDescricao: body.assetDescricao,
-      patrimonio: body.patrimonio,
-      de: body.de,
-      para: body.para,
-      responsavel: body.responsavel,
-      motivo: body.motivo,
-      data: body.data,
-    })
+  const requestedAssetIds: string[] = Array.isArray(body.assetIds)
+    ? body.assetIds.map((id: unknown) => String(id)).filter(Boolean)
+    : body.assetId
+      ? [String(body.assetId)]
+      : []
+  const assetIds = Array.from(new Set(requestedAssetIds))
+
+  if (assetIds.length === 0) {
+    return NextResponse.json({ error: "Selecione pelo menos um bem para movimentar" }, { status: 400 })
+  }
+
+  const placeholders = assetIds.map(() => "?").join(", ")
+  const assetRows = await query<any>(
+    `SELECT id, descricao, patrimonio, patrimonio_provisorio,
+            localizacao_secretaria, localizacao_departamento, localizacao_sala
+       FROM bens
+      WHERE id IN (${placeholders})`,
+    assetIds,
+  )
+  const assetsById = new Map(assetRows.map((asset) => [String(asset.id), asset]))
+
+  if (assetsById.size !== assetIds.length) {
+    return NextResponse.json({ error: "Um ou mais bens selecionados não foram encontrados" }, { status: 404 })
+  }
+
+  try {
+    await Promise.all(assetIds.map((assetId) => assertAssetAccess(user, assetId)))
+  } catch {
+    return NextResponse.json({ error: "Sem permissao para movimentar um dos bens selecionados" }, { status: 403 })
+  }
+
+  const results = await withTransaction(async (connection) => {
+    const movementResults = []
+    for (const assetId of assetIds) {
+      const asset = assetsById.get(assetId)
+      movementResults.push(await registrarMovimentacaoInterna(connection, {
+        assetId,
+        assetDescricao: asset.descricao,
+        patrimonio: asset.patrimonio || asset.patrimonio_provisorio || "",
+        de: {
+          secretaria: asset.localizacao_secretaria,
+          departamento: asset.localizacao_departamento,
+          sala: asset.localizacao_sala,
+        },
+        para: body.para,
+        responsavel: body.responsavel,
+        motivo: body.motivo,
+        data: body.data,
+      }))
+    }
+    return movementResults
   })
 
-  await registrarLog({
-    acao: "transferencia",
-    descricao: `Transferencia: ${body.assetDescricao} - ${body.de?.departamento} para ${body.para?.departamento}`,
-    detalhes: `Motivo: ${body.motivo}`,
-    usuarioId: user.id,
-    usuarioNome: user.nome,
-    usuarioRole: user.role,
-    entidadeTipo: "movimentacao",
-    entidadeId: String(result.insertId),
-    entidadeDescricao: body.assetDescricao,
-    dadosAnteriores: { secretaria: body.de?.secretaria, departamento: body.de?.departamento, sala: body.de?.sala },
-    dadosNovos: { secretaria: body.para?.secretaria, departamento: body.para?.departamento, sala: body.para?.sala },
-  })
+  for (let index = 0; index < results.length; index += 1) {
+    const asset = assetsById.get(assetIds[index])
+    await registrarLog({
+      acao: "transferencia",
+      descricao: `Transferencia: ${asset.descricao} - ${asset.localizacao_departamento || ""} para ${body.para?.departamento || ""}`,
+      detalhes: `Movimentação conjunta com ${results.length} bem(ns). Motivo: ${body.motivo}`,
+      usuarioId: user.id,
+      usuarioNome: user.nome,
+      usuarioRole: user.role,
+      entidadeTipo: "movimentacao",
+      entidadeId: String(results[index].insertId),
+      entidadeDescricao: asset.descricao,
+      dadosAnteriores: { secretaria: asset.localizacao_secretaria, departamento: asset.localizacao_departamento, sala: asset.localizacao_sala },
+      dadosNovos: { secretaria: body.para?.secretaria, departamento: body.para?.departamento, sala: body.para?.sala },
+    })
+  }
 
   await criarNotificacao({
     roleDestino: "assistente",
     titulo: "Movimentacao registrada",
-    mensagem: `${body.assetDescricao} foi transferido para ${body.para?.departamento}.`,
+    mensagem: `${results.length} bem(ns) foram transferidos para ${body.para?.departamento}.`,
     tipo: "info",
     link: "movimentacoes",
   })
 
-  return NextResponse.json({ id: result.insertId }, { status: 201 })
+  return NextResponse.json({
+    id: results[0]?.insertId,
+    ids: results.map((result) => result.insertId),
+    count: results.length,
+  }, { status: 201 })
 })

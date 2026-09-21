@@ -137,7 +137,8 @@ export function Movimentacoes() {
   const [saved, setSaved] = useState(false)
   const [fieldErrors, setFieldErrors] = useState<string[]>([])
 
-  const [formAssetId, setFormAssetId] = useState("")
+  const [formAssetPicker, setFormAssetPicker] = useState("")
+  const [formAssetIds, setFormAssetIds] = useState<string[]>([])
   const [formDestinoSec, setFormDestinoSec] = useState("")
   const [formDestinoDep, setFormDestinoDep] = useState("")
   const [formDestinoSala, setFormDestinoSala] = useState("")
@@ -164,7 +165,20 @@ export function Movimentacoes() {
   const deptos = selectedSec?.departamentos || []
   const selectedDep = deptos.find((d: any) => d.nome === formDestinoDep)
   const salas = selectedDep?.salas || []
-  const selectedAsset = bens.find((a: any) => a.id === formAssetId)
+  const selectedAssets = formAssetIds
+    .map((assetId) => bens.find((asset: any) => asset.id === assetId))
+    .filter(Boolean)
+
+  const selectableMovementAssets = useMemo(() => {
+    const selectedSet = new Set(formAssetIds)
+    return bens
+      .filter((asset: any) => !selectedSet.has(asset.id))
+      .map((asset: any) => ({
+        value: asset.id,
+        label: `${asset.patrimonio} - ${asset.descricao}`,
+        searchTerms: `${asset.patrimonio} ${asset.descricao} ${asset.localizacao?.departamento || ""} ${asset.localizacao?.sala || ""}`,
+      }))
+  }, [bens, formAssetIds])
 
   const requestSelectedSec = secretarias.find((s: any) => s.nome === requestDestinoSec)
   const requestDeptos = requestSelectedSec?.departamentos || []
@@ -237,7 +251,7 @@ export function Movimentacoes() {
     const missingFields: string[] = []
     const newFieldErrors: string[] = []
 
-    if (!formAssetId) { missingFields.push("Bem Patrimonial"); newFieldErrors.push("formAssetId") }
+    if (formAssetIds.length === 0) { missingFields.push("Bens Patrimoniais"); newFieldErrors.push("formAssetIds") }
     if (!formDestinoSec) { missingFields.push("Secretaria de Destino"); newFieldErrors.push("formDestinoSec") }
     if (!formDestinoDep) { missingFields.push("Departamento"); newFieldErrors.push("formDestinoDep") }
     if (!formDestinoSala) { missingFields.push("Sala"); newFieldErrors.push("formDestinoSala") }
@@ -257,12 +271,8 @@ export function Movimentacoes() {
 
     setSaving(true)
     try {
-      const asset = bens.find((b: any) => b.id === formAssetId)
       await api.createMovimentacao({
-        assetId: formAssetId,
-        assetDescricao: asset?.descricao || "",
-        patrimonio: asset?.patrimonio || "",
-        de: asset?.localizacao || {},
+        assetIds: formAssetIds,
         para: { secretaria: formDestinoSec, departamento: formDestinoDep, sala: formDestinoSala },
         responsavel: formResponsavel,
         motivo: formMotivo,
@@ -278,7 +288,8 @@ export function Movimentacoes() {
       setTimeout(() => {
         setSaved(false)
         setNewMovOpen(false)
-        setFormAssetId("")
+        setFormAssetPicker("")
+        setFormAssetIds([])
         setFormDestinoSec("")
         setFormDestinoDep("")
         setFormDestinoSala("")
@@ -443,63 +454,59 @@ export function Movimentacoes() {
                 <DialogHeader>
                   <DialogTitle>Registrar Movimentacao</DialogTitle>
                   <DialogDescription>
-                    Preencha os dados para registrar a movimentacao do bem patrimonial.
+                    Selecione um ou mais bens para registrar a movimentacao para o mesmo destino.
                   </DialogDescription>
                 </DialogHeader>
                 <div className="flex flex-col gap-4 mt-2">
                   <div className="flex flex-col gap-2">
-                    <Label required className={fieldErrors.includes("formAssetId") ? "text-destructive" : ""}>Bem Patrimonial</Label>
-                    <SearchableSelect
-                      value={formAssetId}
-                      onValueChange={(v) => {
-                        setFormAssetId(v)
-                        if (fieldErrors.includes("formAssetId")) setFieldErrors((prev) => prev.filter((item) => item !== "formAssetId"))
-                      }}
-                      items={bens.map((a: any) => ({
-                        value: a.id,
-                        label: `${a.patrimonio} - ${a.descricao}`,
-                        searchTerms: `${a.patrimonio} ${a.descricao}`,
-                      }))}
-                      placeholder={bensLoading ? "Carregando..." : "Selecione o bem"}
-                      searchPlaceholder="Buscar por nome ou patrimonio..."
-                      disabled={bensLoading}
-                      className={fieldErrors.includes("formAssetId") ? "h-auto min-h-10 whitespace-normal text-left border-destructive ring-offset-destructive" : "h-auto min-h-10 whitespace-normal text-left"}
-                    />
-                    {formAssetId && (
-                      <div className="rounded-lg border bg-muted/40 p-3 text-sm">
-                        <p className="font-medium break-words">
-                          {selectedAsset?.descricao || "Bem selecionado"}
-                        </p>
-                        <p className="mt-1 break-all text-xs font-mono text-muted-foreground">
-                          {selectedAsset?.patrimonio || ""}
-                        </p>
-                        <div className="mt-3 rounded-md border bg-background/80 p-3">
-                          <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                            Localizacao atual do bem
-                          </p>
-                          <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                            <div>
-                              <p className="text-[11px] uppercase text-muted-foreground">Secretaria</p>
-                              <p className="break-words text-sm">
-                                {selectedAsset?.localizacao?.secretaria || "Nao informado"}
-                              </p>
-                            </div>
-                            <div>
-                              <p className="text-[11px] uppercase text-muted-foreground">Departamento</p>
-                              <p className="break-words text-sm">
-                                {selectedAsset?.localizacao?.departamento || "Nao informado"}
-                              </p>
-                            </div>
-                            <div className="sm:col-span-2">
-                              <p className="text-[11px] uppercase text-muted-foreground">Sala</p>
-                              <p className="break-words text-sm">
-                                {selectedAsset?.localizacao?.sala || "Nao informado"}
-                              </p>
-                            </div>
-                          </div>
-                        </div>
+                    <Label required className={fieldErrors.includes("formAssetIds") ? "text-destructive" : ""}>Bens Patrimoniais</Label>
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <div className="flex-1">
+                        <SearchableSelect
+                          value={formAssetPicker}
+                          onValueChange={setFormAssetPicker}
+                          items={selectableMovementAssets}
+                          placeholder={bensLoading ? "Carregando..." : "Buscar bem para adicionar"}
+                          searchPlaceholder="Buscar por nome, patrimonio ou local..."
+                          disabled={bensLoading}
+                          className={fieldErrors.includes("formAssetIds") ? "h-auto min-h-10 whitespace-normal text-left border-destructive ring-offset-destructive" : "h-auto min-h-10 whitespace-normal text-left"}
+                        />
                       </div>
-                    )}
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => {
+                          if (!formAssetPicker) return
+                          setFormAssetIds((current) => [...current, formAssetPicker])
+                          setFormAssetPicker("")
+                          setFieldErrors((current) => current.filter((item) => item !== "formAssetIds"))
+                        }}
+                        disabled={!formAssetPicker}
+                      >
+                        Adicionar bem
+                      </Button>
+                    </div>
+                    <div className="grid gap-2">
+                      {selectedAssets.length === 0 && (
+                        <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                          Nenhum bem selecionado.
+                        </div>
+                      )}
+                      {selectedAssets.map((asset: any) => (
+                        <div key={asset.id} className="flex items-start justify-between gap-3 rounded-md border bg-muted/40 p-3 text-sm">
+                          <div className="min-w-0">
+                            <p className="font-medium break-words">{asset.descricao}</p>
+                            <p className="mt-1 break-all text-xs font-mono text-muted-foreground">{asset.patrimonio}</p>
+                            <p className="mt-1 text-xs text-muted-foreground break-words">
+                              Atual: {asset.localizacao?.departamento || "Nao informado"} / {asset.localizacao?.sala || "Nao informado"}
+                            </p>
+                          </div>
+                          <Button type="button" variant="ghost" size="icon" onClick={() => setFormAssetIds((current) => current.filter((id) => id !== asset.id))}>
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
 
                   <div className="rounded-lg border border-border p-4">
