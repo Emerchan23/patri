@@ -5,6 +5,7 @@ import { registrarLog } from "@/lib/audit"
 import { criarNotificacao } from "@/lib/notifications"
 import { ensureMovimentacaoSolicitacaoSchema } from "@/lib/movimentacao-solicitacao-schema"
 import { registrarMovimentacaoInterna } from "@/lib/movimentacao-service"
+import { findCanonicalLocation } from "@/lib/location-match"
 
 function canManageRequest(user: any, request: any) {
   if (user.role === "administrador") return true
@@ -66,6 +67,24 @@ export const PATCH = withAuth(async (request, { user, params }) => {
       return { error: "Esta solicitacao ja foi decidida.", status: 409 as const }
     }
 
+    let approvalDestination: Awaited<ReturnType<typeof findCanonicalLocation>> = null
+    if (action === "aprovar") {
+      approvalDestination = await findCanonicalLocation(connection, {
+        secretaria: solicitacao.secretaria_destino,
+        departamento: solicitacao.departamento_destino,
+        sala: solicitacao.sala_destino,
+      })
+      if (!approvalDestination) {
+        return {
+          error: "O destino desta solicitacao não existe mais ou está duplicado. Revise o pedido antes de aprovar.",
+          status: 409 as const,
+        }
+      }
+      solicitacao.secretaria_destino = approvalDestination.secretaria
+      solicitacao.departamento_destino = approvalDestination.departamento
+      solicitacao.sala_destino = approvalDestination.sala
+    }
+
     const [itemRows] = await connection.execute(
       `SELECT * FROM solicitacoes_movimentacao_itens
         WHERE solicitacao_id = ? ORDER BY bem_id FOR UPDATE`,
@@ -85,6 +104,10 @@ export const PATCH = withAuth(async (request, { user, params }) => {
         [motivoRejeicao, user.id, user.nome, id]
       )
       return { action, solicitacao, itens }
+    }
+
+    if (!approvalDestination) {
+      return { error: "Destino da solicitacao invalido.", status: 409 as const }
     }
 
     const bemIds = itens.map((item) => item.bem_id)
@@ -124,11 +147,7 @@ export const PATCH = withAuth(async (request, { user, params }) => {
           departamento: item.de_departamento,
           sala: item.de_sala,
         },
-        para: {
-          secretaria: solicitacao.secretaria_destino,
-          departamento: solicitacao.departamento_destino,
-          sala: solicitacao.sala_destino,
-        },
+        para: approvalDestination,
         responsavel: user.nome,
         motivo: `Solicitacao aprovada: ${solicitacao.motivo}`,
       })
