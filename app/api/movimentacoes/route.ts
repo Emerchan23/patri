@@ -6,7 +6,7 @@ import { criarNotificacao } from "@/lib/notifications"
 import { appendScopeClause, getTransferScopeClause, isLocationInScope } from "@/lib/asset-scope"
 import { registrarMovimentacaoInterna } from "@/lib/movimentacao-service"
 import { buildSmartSearch } from "@/lib/smart-search"
-import { sameLocation } from "@/lib/location-match"
+import { findCanonicalLocation, sameLocation } from "@/lib/location-match"
 
 // GET /api/movimentacoes
 export const GET = withAuth(async (request, { user }) => {
@@ -139,10 +139,6 @@ export const POST = withPermission("registrarMovimentacao", async (request, { us
     departamento: requestedDestination.departamento.trim(),
     sala: requestedDestination.sala.trim(),
   }
-  if (!isLocationInScope(user, destination)) {
-    return NextResponse.json({ error: "Sem permissao para movimentar bem para este destino" }, { status: 403 })
-  }
-
   const requestedAssetIds: string[] = Array.isArray(body.assetIds)
     ? body.assetIds.map((id: unknown) => String(id)).filter(Boolean)
     : body.assetId
@@ -156,6 +152,12 @@ export const POST = withPermission("registrarMovimentacao", async (request, { us
 
   const placeholders = assetIds.map(() => "?").join(", ")
   const transaction = await withTransaction(async (connection) => {
+    const canonicalDestination = await findCanonicalLocation(connection, destination)
+    if (!canonicalDestination) return { error: "invalid_destination" as const }
+    if (!isLocationInScope(user, canonicalDestination)) {
+      return { error: "destination_forbidden" as const }
+    }
+
     const [rows] = await connection.execute(
       `SELECT id, descricao, patrimonio, patrimonio_provisorio,
               localizacao_secretaria, localizacao_departamento, localizacao_sala
@@ -193,7 +195,7 @@ export const POST = withPermission("registrarMovimentacao", async (request, { us
             departamento: asset.localizacao_departamento,
             sala: asset.localizacao_sala,
           },
-          destination,
+          canonicalDestination,
         ),
       )
     ) return { error: "already_there" as const }
@@ -211,16 +213,22 @@ export const POST = withPermission("registrarMovimentacao", async (request, { us
           departamento: asset.localizacao_departamento,
           sala: asset.localizacao_sala,
         },
-        para: destination,
+        para: canonicalDestination,
         responsavel: user.nome,
         motivo: body.motivo,
         data: body.data,
       }))
     }
-    return { results: movementResults, assetsById }
+    return { results: movementResults, assetsById, destination: canonicalDestination }
   })
 
   if ("error" in transaction) {
+    if (transaction.error === "invalid_destination") {
+      return NextResponse.json({ error: "O destino informado não corresponde a uma sala cadastrada." }, { status: 400 })
+    }
+    if (transaction.error === "destination_forbidden") {
+      return NextResponse.json({ error: "Sem permissao para movimentar bem para este destino" }, { status: 403 })
+    }
     if (transaction.error === "missing") {
       return NextResponse.json({ error: "Um ou mais bens selecionados não foram encontrados" }, { status: 404 })
     }
@@ -230,14 +238,14 @@ export const POST = withPermission("registrarMovimentacao", async (request, { us
     return NextResponse.json({ error: "Um ou mais bens ja estao no local de destino" }, { status: 400 })
   }
 
-  const { results, assetsById } = transaction
+  const { results, assetsById, destination: canonicalDestination } = transaction
 
   for (let index = 0; index < results.length; index += 1) {
     const asset = assetsById.get(assetIds[index])
     if (!asset) continue
     await registrarLog({
       acao: "transferencia",
-      descricao: `Transferencia: ${asset.descricao} - ${asset.localizacao_departamento || ""} para ${destination.departamento || ""}`,
+      descricao: `Transferencia: ${asset.descricao} - ${asset.localizacao_departamento || ""} para ${canonicalDestination.departamento || ""}`,
       detalhes: `Movimentação conjunta com ${results.length} bem(ns). Motivo: ${body.motivo}`,
       usuarioId: user.id,
       usuarioNome: user.nome,
@@ -246,14 +254,14 @@ export const POST = withPermission("registrarMovimentacao", async (request, { us
       entidadeId: String(results[index].insertId),
       entidadeDescricao: asset.descricao,
       dadosAnteriores: { secretaria: asset.localizacao_secretaria, departamento: asset.localizacao_departamento, sala: asset.localizacao_sala },
-      dadosNovos: { secretaria: destination.secretaria, departamento: destination.departamento, sala: destination.sala },
+      dadosNovos: { secretaria: canonicalDestination.secretaria, departamento: canonicalDestination.departamento, sala: canonicalDestination.sala },
     })
   }
 
   await criarNotificacao({
     roleDestino: "assistente",
     titulo: "Movimentacao registrada",
-    mensagem: `${results.length} bem(ns) foram transferidos para ${destination.departamento}.`,
+    mensagem: `${results.length} bem(ns) foram transferidos para ${canonicalDestination.departamento}.`,
     tipo: "info",
     link: "movimentacoes",
   })
