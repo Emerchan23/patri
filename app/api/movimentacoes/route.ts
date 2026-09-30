@@ -6,6 +6,7 @@ import { criarNotificacao } from "@/lib/notifications"
 import { appendScopeClause, getTransferScopeClause, isLocationInScope } from "@/lib/asset-scope"
 import { registrarMovimentacaoInterna } from "@/lib/movimentacao-service"
 import { buildSmartSearch } from "@/lib/smart-search"
+import { sameLocation } from "@/lib/location-match"
 
 // GET /api/movimentacoes
 export const GET = withAuth(async (request, { user }) => {
@@ -121,17 +122,22 @@ export const GET = withAuth(async (request, { user }) => {
 // POST /api/movimentacoes
 export const POST = withPermission("registrarMovimentacao", async (request, { user }) => {
   const body = await request.json()
-  const destination = body?.para
+  const requestedDestination = body?.para
   if (
-    !destination ||
+    !requestedDestination ||
     !["secretaria", "departamento", "sala"].every(
-      (field) => typeof destination[field] === "string" && destination[field].trim(),
+      (field) => typeof requestedDestination[field] === "string" && requestedDestination[field].trim(),
     )
   ) {
     return NextResponse.json({ error: "Selecione secretaria, departamento e sala de destino" }, { status: 400 })
   }
   if (typeof body?.motivo !== "string" || !body.motivo.trim()) {
     return NextResponse.json({ error: "Motivo e obrigatorio" }, { status: 400 })
+  }
+  const destination = {
+    secretaria: requestedDestination.secretaria.trim(),
+    departamento: requestedDestination.departamento.trim(),
+    sala: requestedDestination.sala.trim(),
   }
   if (!isLocationInScope(user, destination)) {
     return NextResponse.json({ error: "Sem permissao para movimentar bem para este destino" }, { status: 403 })
@@ -181,10 +187,14 @@ export const POST = withPermission("registrarMovimentacao", async (request, { us
     ) return { error: "forbidden" as const }
     if (
       assetRows.some(
-        (asset) =>
-          asset.localizacao_secretaria === destination.secretaria &&
-          asset.localizacao_departamento === destination.departamento &&
-          asset.localizacao_sala === destination.sala,
+        (asset) => sameLocation(
+          {
+            secretaria: asset.localizacao_secretaria,
+            departamento: asset.localizacao_departamento,
+            sala: asset.localizacao_sala,
+          },
+          destination,
+        ),
       )
     ) return { error: "already_there" as const }
 
