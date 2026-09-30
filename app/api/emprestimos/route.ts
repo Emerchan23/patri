@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server"
-import { query, execute } from "@/lib/db"
-import { withAuth } from "@/lib/api-auth"
+import { query, withTransaction } from "@/lib/db"
+import { withPermission } from "@/lib/api-auth"
 import { registrarLog } from "@/lib/audit"
 import { criarNotificacao } from "@/lib/notifications"
-import { appendScopeClause, assertAssetAccess, getTransferScopeClause, isLocationInScope } from "@/lib/asset-scope"
+import { appendScopeClause, getTransferScopeClause, isLocationInScope } from "@/lib/asset-scope"
 import { ensureTermosResponsabilidadeSchema } from "@/lib/termos-responsabilidade-schema"
 import { buildSmartSearch } from "@/lib/smart-search"
 
 // GET /api/emprestimos
-export const GET = withAuth(async (request, { user }) => {
+export const GET = withPermission("gerenciarEmprestimos", async (request, { user }) => {
   const url = new URL(request.url)
   const status = url.searchParams.get("status")
   const busca = url.searchParams.get("busca")
@@ -103,70 +103,151 @@ export const GET = withAuth(async (request, { user }) => {
 })
 
 // POST /api/emprestimos
-export const POST = withAuth(async (request, { user }) => {
+export const POST = withPermission("gerenciarEmprestimos", async (request, { user }) => {
   const body = await request.json()
   await ensureTermosResponsabilidadeSchema()
-  if (body.assetId) {
-    try {
-      await assertAssetAccess(user, body.assetId)
-    } catch {
-      return NextResponse.json({ error: "Sem permissao para emprestar este bem" }, { status: 403 })
-    }
+  const requiredFields = [
+    body.assetDescricao,
+    body.responsavelRecebimento,
+    body.motivo,
+    body.dataEmprestimo,
+    body.dataPrevistaDevolucao,
+    body.destino?.secretaria,
+    body.destino?.departamento,
+    body.destino?.sala,
+  ]
+  if (requiredFields.some((value) => !String(value || "").trim())) {
+    return NextResponse.json({ error: "Preencha bem, responsáveis, destino, datas e motivo do empréstimo." }, { status: 400 })
+  }
+  const validDate = (value: unknown) => {
+    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+    const parsed = new Date(`${value}T00:00:00.000Z`)
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
+  }
+  if (!validDate(body.dataEmprestimo) || !validDate(body.dataPrevistaDevolucao)) {
+    return NextResponse.json({ error: "Informe datas válidas no formato AAAA-MM-DD." }, { status: 400 })
+  }
+  if (body.dataPrevistaDevolucao < body.dataEmprestimo) {
+    return NextResponse.json({ error: "A devolução prevista não pode anteceder a data do empréstimo." }, { status: 400 })
   }
   if (!isLocationInScope(user, body.destino)) {
     return NextResponse.json({ error: "Sem permissao para emprestar bem para este destino" }, { status: 403 })
   }
-
-  const result = await execute(
-    `INSERT INTO emprestimos (bem_id, bem_descricao, patrimonio, origem_secretaria, origem_departamento, origem_sala,
-     destino_secretaria, destino_departamento, destino_sala, responsavel_emprestimo, responsavel_recebimento,
-     data_emprestimo, data_prevista_devolucao, motivo, observacoes, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ativo')`,
-    [
-      body.assetId || null, body.assetDescricao, body.patrimonio,
-      body.origem?.secretaria, body.origem?.departamento, body.origem?.sala,
-      body.destino?.secretaria, body.destino?.departamento, body.destino?.sala,
-      body.responsavelEmprestimo, body.responsavelRecebimento,
-      body.dataEmprestimo, body.dataPrevistaDevolucao,
-      body.motivo, body.observacoes || null,
-    ]
-  )
-
-  // Update asset status to emprestado
-  if (body.assetId) {
-    await execute("UPDATE bens SET status = 'emprestado' WHERE id = ?", [body.assetId])
+  const normalizedPlace = (value: unknown) => String(value || "").trim().toLocaleLowerCase("pt-BR").replace(/\s+/g, " ")
+  const samePlace = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+    normalizedPlace(a.secretaria) === normalizedPlace(b.secretaria) &&
+    normalizedPlace(a.departamento) === normalizedPlace(b.departamento) &&
+    normalizedPlace(a.sala) === normalizedPlace(b.sala)
+  const originFromBody = body.origem && typeof body.origem === "object" ? body.origem : {}
+  if (!body.assetId && samePlace(originFromBody, body.destino)) {
+    return NextResponse.json({ error: "A origem e o destino do empréstimo não podem ser iguais." }, { status: 400 })
   }
 
-  if (body.exigirTermo !== false) {
-    await execute(
-      `INSERT INTO termos_responsabilidade
-       (emprestimo_id, bem_id, patrimonio, responsavel_nome, responsavel_cargo, gerado_por_usuario_id)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [result.insertId, body.assetId || null, body.patrimonio, body.responsavelRecebimento, body.cargoResponsavelRecebimento || null, user.id]
+  const result = await withTransaction(async (connection) => {
+    let asset: Record<string, unknown> | null = null
+    if (body.assetId) {
+      const [assetRows] = await connection.execute(
+        `SELECT id, descricao, patrimonio, status, localizacao_secretaria, localizacao_departamento, localizacao_sala
+           FROM bens WHERE id = ? FOR UPDATE`,
+        [body.assetId]
+      )
+      asset = (assetRows as Record<string, unknown>[])[0] || null
+      if (!asset) return { error: "Bem não encontrado.", status: 404 as const }
+
+      const actualOrigin = {
+        secretaria: typeof asset.localizacao_secretaria === "string" ? asset.localizacao_secretaria : null,
+        departamento: typeof asset.localizacao_departamento === "string" ? asset.localizacao_departamento : null,
+        sala: typeof asset.localizacao_sala === "string" ? asset.localizacao_sala : null,
+      }
+      if (!isLocationInScope(user, actualOrigin)) {
+        return { error: "Sem permissão para emprestar este bem.", status: 403 as const }
+      }
+      if (String(asset.status || "").toLowerCase() !== "ativo") {
+        return { error: "Este bem não está disponível para empréstimo.", status: 409 as const }
+      }
+      const [activeLoans] = await connection.execute(
+        `SELECT id FROM emprestimos WHERE bem_id = ? AND status IN ('ativo', 'atrasado') LIMIT 1 FOR UPDATE`,
+        [body.assetId]
+      )
+      if ((activeLoans as any[]).length > 0) {
+        return { error: "Este bem já possui um empréstimo em aberto.", status: 409 as const }
+      }
+      if (samePlace(actualOrigin, body.destino)) {
+        return { error: "A origem e o destino do empréstimo não podem ser iguais.", status: 400 as const }
+      }
+    }
+
+    const origin = asset
+      ? {
+          secretaria: asset.localizacao_secretaria,
+          departamento: asset.localizacao_departamento,
+          sala: asset.localizacao_sala,
+        }
+      : originFromBody
+    if (!isLocationInScope(user, origin)) {
+      return { error: "Sem permissão para emprestar bem a partir desta origem.", status: 403 as const }
+    }
+    const assetDescription = String(asset?.descricao || body.assetDescricao).trim()
+    const patrimony = asset?.patrimonio || body.patrimonio || null
+    const [insertLoan] = await connection.execute(
+      `INSERT INTO emprestimos (bem_id, bem_descricao, patrimonio, origem_secretaria, origem_departamento, origem_sala,
+       destino_secretaria, destino_departamento, destino_sala, responsavel_emprestimo, responsavel_recebimento,
+       data_emprestimo, data_prevista_devolucao, motivo, observacoes, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ativo')`,
+      [
+        body.assetId || null, assetDescription, patrimony,
+        origin.secretaria, origin.departamento, origin.sala,
+        body.destino.secretaria, body.destino.departamento, body.destino.sala,
+        user.nome, String(body.responsavelRecebimento).trim(),
+        body.dataEmprestimo, body.dataPrevistaDevolucao,
+        String(body.motivo).trim(), body.observacoes || null,
+      ]
     )
+    const loanId = Number((insertLoan as any).insertId || 0)
+
+    if (asset) {
+      await connection.execute(
+        `UPDATE bens SET status = 'emprestado' WHERE id = ? AND status = 'ativo'`,
+        [body.assetId]
+      )
+    }
+
+    if (body.exigirTermo !== false) {
+      await connection.execute(
+        `INSERT INTO termos_responsabilidade
+         (emprestimo_id, bem_id, patrimonio, responsavel_nome, responsavel_cargo, gerado_por_usuario_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [loanId, body.assetId || null, patrimony, String(body.responsavelRecebimento).trim(), body.cargoResponsavelRecebimento || null, user.id]
+      )
+    }
+    return { loanId, assetDescription, origin }
+  })
+
+  if ("error" in result) {
+    return NextResponse.json({ error: result.error }, { status: result.status })
   }
 
   await registrarLog({
     acao: "emprestimo",
-    descricao: `Emprestimo registrado: ${body.assetDescricao}`,
-    detalhes: `De ${body.origem?.departamento} para ${body.destino?.departamento}. Motivo: ${body.motivo}`,
+    descricao: `Emprestimo registrado: ${result.assetDescription}`,
+    detalhes: `De ${result.origin.departamento} para ${body.destino?.departamento}. Motivo: ${body.motivo}`,
     usuarioId: user.id,
     usuarioNome: user.nome,
     usuarioRole: user.role,
     entidadeTipo: "emprestimo",
-    entidadeId: String(result.insertId),
-    entidadeDescricao: body.assetDescricao,
+    entidadeId: String(result.loanId),
+    entidadeDescricao: result.assetDescription,
   })
 
   await criarNotificacao({
     roleDestino: "gestor",
     titulo: "Novo emprestimo registrado",
-    mensagem: `${body.assetDescricao} emprestado para ${body.destino?.departamento}.`,
+    mensagem: `${result.assetDescription} emprestado para ${body.destino?.departamento}.`,
     tipo: "info",
     link: "emprestimos",
   })
 
-  return NextResponse.json({ id: result.insertId }, { status: 201 })
+  return NextResponse.json({ id: result.loanId }, { status: 201 })
 })
 
 function dbRowToLoan(row: Record<string, unknown>) {

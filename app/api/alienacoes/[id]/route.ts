@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { query, queryOne, execute } from "@/lib/db"
+import { query, queryOne, withTransaction } from "@/lib/db"
 import { withPermission } from "@/lib/api-auth"
 
 // GET /api/alienacoes/[id] - Detalhes da alienacao
@@ -59,78 +59,98 @@ export const PUT = withPermission("gerenciarAlienacoes", async (
       destinatario_documento,
       destinatario_endereco,
       observacoes,
+      tipo,
+      numero_processo,
+      numero_edital,
+      data_abertura,
       concluir // Flag para indicar finalizacao
     } = body
 
     // Se a flag concluir for true, executa logica de finalizacao
     if (concluir) {
-       // Verificar se status permite conclusao
-       const atual = await queryOne<any>("SELECT status FROM alienacoes WHERE id = ?", [id])
-       if (atual.status === 'concluido') {
-         return NextResponse.json({ error: "Alienacao ja concluida" }, { status: 400 })
-       }
-
-       // Atualizar alienacao para concluido
-       await execute(
-         `UPDATE alienacoes SET 
-            status = 'concluido', 
-            data_conclusao = CURDATE(),
-            destinatario_nome = ?,
-            destinatario_documento = ?,
-            destinatario_endereco = ?,
-            observacoes = ?
-          WHERE id = ?`,
-         [destinatario_nome, destinatario_documento, destinatario_endereco, observacoes, id]
-       )
-
-       // Baixar bens vinculados
-       // Primeiro pegar os IDs dos bens
-       const itens = await query<any>("SELECT bem_id FROM alienacao_itens WHERE alienacao_id = ?", [id])
-       
-       for (const item of itens) {
-         // Atualizar status do bem para baixado
-         await execute(
-           `UPDATE bens SET status = 'baixado' WHERE id = ?`,
-           [item.bem_id]
+       const result = await withTransaction(async (connection) => {
+         const [alienacoes] = await connection.execute(
+           "SELECT status FROM alienacoes WHERE id = ? FOR UPDATE",
+           [id]
          )
-         
-         // Atualizar status do item na alienacao
-         await execute(
-            `UPDATE alienacao_itens SET status_item = 'alienado' WHERE alienacao_id = ? AND bem_id = ?`,
-            [id, item.bem_id]
+         const atual = (alienacoes as Array<{ status: string }>)[0]
+         if (!atual) return "not_found"
+         if (atual.status === "concluido") return "already_done"
+         if (atual.status === "cancelado") return "cancelled"
+
+         const [rows] = await connection.execute(
+           "SELECT bem_id FROM alienacao_itens WHERE alienacao_id = ? AND status_item = 'pendente' FOR UPDATE",
+           [id]
+         )
+         const itens = rows as Array<{ bem_id: number }>
+         if (itens.length === 0) return "empty"
+
+         await connection.execute(
+           `UPDATE alienacoes SET
+              status = 'concluido', data_conclusao = CURDATE(), destinatario_nome = ?,
+              destinatario_documento = ?, destinatario_endereco = ?, observacoes = ?
+            WHERE id = ?`,
+           [destinatario_nome, destinatario_documento, destinatario_endereco, observacoes, id]
          )
 
-         // Criar log de auditoria (simplificado, idealmente via API de logs)
-         await execute(
-           `INSERT INTO audit_logs (acao, descricao, detalhes, usuario_id, usuario_nome, usuario_role, entidade_tipo, entidade_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-           [
-             'baixa_alienacao', 
-             `Bem baixado por alienacao #${id}`, 
-             `Processo concluido`, 
-             user.id, 
-             user.nome, 
-             user.role, 
-             'bem', 
-             item.bem_id
-           ]
-         )
-       }
+         for (const item of itens) {
+           await connection.execute("UPDATE bens SET status = 'baixado' WHERE id = ?", [item.bem_id])
+           await connection.execute(
+             "UPDATE alienacao_itens SET status_item = 'alienado' WHERE alienacao_id = ? AND bem_id = ?",
+             [id, item.bem_id]
+           )
+           await connection.execute(
+             `INSERT INTO audit_logs (acao, descricao, detalhes, usuario_id, usuario_nome, usuario_role, entidade_tipo, entidade_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+             ["baixa_alienacao", `Bem baixado por alienacao #${id}`, "Processo concluido", user.id, user.nome, user.role, "bem", item.bem_id]
+           )
+         }
+         return "ok"
+       })
+
+       if (result === "not_found") return NextResponse.json({ error: "Alienacao nao encontrada" }, { status: 404 })
+       if (result === "already_done") return NextResponse.json({ error: "Alienacao ja concluida" }, { status: 400 })
+       if (result === "cancelled") return NextResponse.json({ error: "Alienacao cancelada nao pode ser concluida" }, { status: 400 })
+       if (result === "empty") return NextResponse.json({ error: "Inclua ao menos um bem antes de concluir a alienacao" }, { status: 400 })
 
        return NextResponse.json({ message: "Alienacao concluida e bens baixados com sucesso" })
     }
 
-    // Atualizacao normal
-    await execute(
-      `UPDATE alienacoes SET 
-        status = COALESCE(?, status),
-        destinatario_nome = COALESCE(?, destinatario_nome),
-        destinatario_documento = COALESCE(?, destinatario_documento),
-        destinatario_endereco = COALESCE(?, destinatario_endereco),
-        observacoes = COALESCE(?, observacoes)
-       WHERE id = ?`,
-      [status, destinatario_nome, destinatario_documento, destinatario_endereco, observacoes, id]
-    )
+    if (tipo && !["venda", "leilao", "doacao", "permuta", "descarte"].includes(tipo)) {
+      return NextResponse.json({ error: "Tipo de alienacao invalido" }, { status: 400 })
+    }
+    if (status && !["aberto", "em_avaliacao", "cancelado"].includes(status)) {
+      return NextResponse.json({ error: "Status invalido; use o fluxo de conclusao para dar baixa nos bens" }, { status: 400 })
+    }
+    if (numero_processo !== undefined && !String(numero_processo).trim()) {
+      return NextResponse.json({ error: "Numero do processo nao pode ficar vazio" }, { status: 400 })
+    }
+    const result = await withTransaction(async (connection) => {
+      const [rows] = await connection.execute(
+        "SELECT status FROM alienacoes WHERE id = ? FOR UPDATE",
+        [id]
+      )
+      const current = (rows as Array<{ status: string }>)[0]
+      if (!current) return "not_found"
+      if (!["aberto", "em_avaliacao"].includes(current.status)) return "closed"
+      await connection.execute(
+        `UPDATE alienacoes SET
+          tipo = COALESCE(?, tipo),
+          numero_processo = COALESCE(?, numero_processo),
+          numero_edital = COALESCE(?, numero_edital),
+          data_abertura = COALESCE(?, data_abertura),
+          status = COALESCE(?, status),
+          destinatario_nome = COALESCE(?, destinatario_nome),
+          destinatario_documento = COALESCE(?, destinatario_documento),
+          destinatario_endereco = COALESCE(?, destinatario_endereco),
+          observacoes = COALESCE(?, observacoes)
+         WHERE id = ?`,
+        [tipo, numero_processo, numero_edital, data_abertura, status, destinatario_nome, destinatario_documento, destinatario_endereco, observacoes, id]
+      )
+      return "ok"
+    })
+    if (result === "not_found") return NextResponse.json({ error: "Alienacao nao encontrada" }, { status: 404 })
+    if (result === "closed") return NextResponse.json({ error: "Somente processos abertos podem ser editados" }, { status: 400 })
 
     return NextResponse.json({ message: "Alienacao atualizada com sucesso" })
   } catch (error) {
@@ -147,17 +167,20 @@ export const DELETE = withPermission("gerenciarAlienacoes", async (
   try {
     const id = params?.id
     
-    // Verificar status
-    const alienacao = await queryOne<any>("SELECT status FROM alienacoes WHERE id = ?", [id])
-    if (!alienacao) {
-        return NextResponse.json({ error: "Alienacao nao encontrada" }, { status: 404 })
-    }
+    const result = await withTransaction(async (connection) => {
+      const [rows] = await connection.execute(
+        "SELECT status FROM alienacoes WHERE id = ? FOR UPDATE",
+        [id]
+      )
+      const alienacao = (rows as Array<{ status: string }>)[0]
+      if (!alienacao) return "not_found"
+      if (alienacao.status !== "aberto") return "not_open"
+      await connection.execute("DELETE FROM alienacoes WHERE id = ?", [id])
+      return "ok"
+    })
 
-    if (alienacao.status !== 'aberto') {
-        return NextResponse.json({ error: "Apenas alienacoes em aberto podem ser excluidas" }, { status: 400 })
-    }
-
-    await execute("DELETE FROM alienacoes WHERE id = ?", [id])
+    if (result === "not_found") return NextResponse.json({ error: "Alienacao nao encontrada" }, { status: 404 })
+    if (result === "not_open") return NextResponse.json({ error: "Apenas alienacoes em aberto podem ser excluidas" }, { status: 400 })
     
     return NextResponse.json({ message: "Alienacao excluida com sucesso" })
 

@@ -1,4 +1,4 @@
-import { execute, queryOne } from "./db"
+import { query, queryOne } from "./db"
 
 export const DEFAULT_WEB_SESSION_DAYS = 3
 export const DEFAULT_MOBILE_SESSION_DAYS = 30
@@ -8,7 +8,15 @@ const DEFAULT_XML_EXTENSION_LINK =
   "https://chromewebstore.google.com/detail/fsist-download-xml-nfe/jclbljmbidghoecicnjofjldjndabajp"
 const DEFAULT_SEFAZ_PORTAL_LINK = "https://www.fsist.com.br/"
 
-let schemaReady = false
+const SYSTEM_SETTINGS_COLUMNS = [
+  "id",
+  "theme_color",
+  "sidebar_color",
+  "link_extensao_xml",
+  "link_portal_sefaz",
+  "session_days_web",
+  "session_days_mobile",
+]
 
 export interface SystemSettingsRecord {
   themeColor: string
@@ -39,67 +47,27 @@ export function getDefaultSystemSettings(): SystemSettingsRecord {
   }
 }
 
-export async function ensureSystemSettingsSchema() {
-  if (schemaReady) return
-
-  await execute(`
-    CREATE TABLE IF NOT EXISTS system_settings (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      theme_color VARCHAR(50) DEFAULT 'blue',
-      sidebar_color VARCHAR(50) DEFAULT 'dark',
-      link_extensao_xml VARCHAR(500) DEFAULT '${DEFAULT_XML_EXTENSION_LINK}',
-      link_portal_sefaz VARCHAR(500) DEFAULT '${DEFAULT_SEFAZ_PORTAL_LINK}',
-      session_days_web INT NOT NULL DEFAULT ${DEFAULT_WEB_SESSION_DAYS},
-      session_days_mobile INT NOT NULL DEFAULT ${DEFAULT_MOBILE_SESSION_DAYS},
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-  `)
-
-  try {
-    await execute(
-      `ALTER TABLE system_settings
-       ADD COLUMN link_extensao_xml VARCHAR(500) DEFAULT '${DEFAULT_XML_EXTENSION_LINK}'`
-    )
-  } catch {}
-
-  try {
-    await execute(
-      `ALTER TABLE system_settings
-       ADD COLUMN link_portal_sefaz VARCHAR(500) DEFAULT '${DEFAULT_SEFAZ_PORTAL_LINK}'`
-    )
-  } catch {}
-
-  try {
-    await execute(
-      `ALTER TABLE system_settings
-       ADD COLUMN session_days_web INT NOT NULL DEFAULT ${DEFAULT_WEB_SESSION_DAYS}`
-    )
-  } catch {}
-
-  try {
-    await execute(
-      `ALTER TABLE system_settings
-       ADD COLUMN session_days_mobile INT NOT NULL DEFAULT ${DEFAULT_MOBILE_SESSION_DAYS}`
-    )
-  } catch {}
-
-  const count = await queryOne<{ count: number }>("SELECT COUNT(*) as count FROM system_settings")
-  if (count && count.count === 0) {
-    await execute(
-      `INSERT INTO system_settings
-        (id, theme_color, sidebar_color, link_extensao_xml, link_portal_sefaz, session_days_web, session_days_mobile)
-       VALUES (1, 'blue', 'dark', ?, ?, ?, ?)` ,
-      [DEFAULT_XML_EXTENSION_LINK, DEFAULT_SEFAZ_PORTAL_LINK, DEFAULT_WEB_SESSION_DAYS, DEFAULT_MOBILE_SESSION_DAYS]
-    )
-  }
-
-  schemaReady = true
+export async function hasSystemSettingsSchema(): Promise<boolean> {
+  const rows = await query<{ COLUMN_NAME: string }>(
+    `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
+    ["system_settings"]
+  )
+  const columns = new Set(rows.map((row) => row.COLUMN_NAME.toLowerCase()))
+  return SYSTEM_SETTINGS_COLUMNS.every((column) => columns.has(column))
 }
 
 export async function getSystemSettings(): Promise<SystemSettingsRecord> {
-  await ensureSystemSettingsSchema()
-
   const defaults = getDefaultSystemSettings()
+  const table = await queryOne<{ tableName: string }>(
+    `SELECT TABLE_NAME AS tableName
+       FROM INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
+    ["system_settings"]
+  )
+  if (!table) return defaults
+
   const row = await queryOne<Record<string, unknown>>("SELECT * FROM system_settings LIMIT 1")
   if (!row) return defaults
 

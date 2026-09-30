@@ -154,7 +154,8 @@ export const POST = withAuth(async (request, { user }) => {
   }
 
   const body = await request.json()
-  const assetIds = Array.isArray(body.assetIds) ? body.assetIds.map(String).filter(Boolean) : []
+  const requestedAssetIds = Array.isArray(body.assetIds) ? body.assetIds.map(String).filter(Boolean) : []
+  const assetIds = [...new Set(requestedAssetIds)]
   const motivo = String(body.motivo || "").trim()
   const secretariaDestino = String(body.secretariaDestino || "").trim()
   const departamentoDestino = String(body.departamentoDestino || "").trim()
@@ -162,6 +163,9 @@ export const POST = withAuth(async (request, { user }) => {
 
   if (assetIds.length === 0) {
     return NextResponse.json({ error: "Selecione pelo menos um bem para solicitar a mudanca." }, { status: 400 })
+  }
+  if (assetIds.length !== requestedAssetIds.length) {
+    return NextResponse.json({ error: "A lista contém bens repetidos. Revise os itens selecionados." }, { status: 400 })
   }
 
   if (!motivo) {
@@ -183,23 +187,36 @@ export const POST = withAuth(async (request, { user }) => {
 
   const scope = getAssetScopeClause(user)
   const placeholders = assetIds.map(() => "?").join(", ")
-  const rows = await query<any>(
-    `SELECT id, patrimonio, descricao, localizacao_secretaria, localizacao_departamento, localizacao_sala
-       FROM bens
-      WHERE id IN (${placeholders})${scope.clause ? ` AND (${scope.clause})` : ""}`,
-    [...assetIds, ...scope.params]
-  )
-
-  if (rows.length !== assetIds.length) {
-    return NextResponse.json({ error: "Um ou mais bens selecionados nao pertencem ao seu escopo atual." }, { status: 403 })
-  }
-
-  const secretariasOrigem = Array.from(new Set(rows.map((row: any) => String(row.localizacao_secretaria || ""))))
-  if (secretariasOrigem.length !== 1 || secretariasOrigem[0] !== user.unidade_secretaria) {
-    return NextResponse.json({ error: "Todos os bens da solicitacao precisam estar na mesma secretaria da unidade do assistente." }, { status: 400 })
-  }
-
+  const normalizedPlace = (value: unknown) => String(value || "").trim().toLocaleLowerCase("pt-BR").replace(/\s+/g, " ")
   const result = await withTransaction(async (connection) => {
+    const [assetRows] = await connection.execute(
+      `SELECT id, patrimonio, descricao, localizacao_secretaria, localizacao_departamento, localizacao_sala
+         FROM bens
+        WHERE id IN (${placeholders})${scope.clause ? ` AND (${scope.clause})` : ""}
+        ORDER BY id FOR UPDATE`,
+      [...assetIds, ...scope.params]
+    )
+    const rows = assetRows as any[]
+
+    if (rows.length !== assetIds.length) {
+      return { error: "Um ou mais bens selecionados nao pertencem ao seu escopo atual.", status: 403 as const }
+    }
+
+    const secretariasOrigem = Array.from(new Set(rows.map((row) => String(row.localizacao_secretaria || ""))))
+    if (secretariasOrigem.length !== 1 || secretariasOrigem[0] !== user.unidade_secretaria) {
+      return { error: "Todos os bens da solicitacao precisam estar na mesma secretaria da unidade do assistente.", status: 400 as const }
+    }
+
+    const alreadyAtDestination = rows.filter((row) =>
+      normalizedPlace(row.localizacao_secretaria) === normalizedPlace(secretariaDestino) &&
+      normalizedPlace(row.localizacao_departamento) === normalizedPlace(departamentoDestino) &&
+      normalizedPlace(row.localizacao_sala) === normalizedPlace(salaDestino)
+    )
+    if (alreadyAtDestination.length > 0) {
+      const codes = alreadyAtDestination.map((row) => row.patrimonio || row.id).join(", ")
+      return { error: `Estes bens já estão no destino: ${codes}. Remova-os antes de solicitar.`, status: 409 as const }
+    }
+
     const [insertRequest] = await connection.execute(
       `INSERT INTO solicitacoes_movimentacao
         (solicitante_usuario_id, solicitante_nome, solicitante_role, secretaria_origem, secretaria_destino, departamento_destino, sala_destino, motivo)
@@ -235,19 +252,24 @@ export const POST = withAuth(async (request, { user }) => {
       )
     }
 
-    return solicitacaoId
+    return { solicitacaoId, totalItens: rows.length }
   })
+
+  if ("error" in result) {
+    return NextResponse.json({ error: result.error }, { status: result.status })
+  }
+  const { solicitacaoId, totalItens } = result
 
   await registrarLog({
     acao: "solicitacao_movimentacao",
-    descricao: `Solicitacao de mudanca criada para ${rows.length} bem(ns)`,
+    descricao: `Solicitacao de mudanca criada para ${totalItens} bem(ns)`,
     detalhes: `Destino: ${departamentoDestino} / ${salaDestino}. Motivo: ${motivo}`,
     usuarioId: user.id,
     usuarioNome: user.nome,
     usuarioRole: user.role,
     entidadeTipo: "solicitacao_movimentacao",
-    entidadeId: String(result),
-    entidadeDescricao: `${rows.length} bem(ns)`,
+    entidadeId: String(solicitacaoId),
+    entidadeDescricao: `${totalItens} bem(ns)`,
     dadosNovos: {
       assetIds,
       secretariaDestino,
@@ -260,7 +282,7 @@ export const POST = withAuth(async (request, { user }) => {
   await criarNotificacao({
     roleDestino: "gestor",
     titulo: "Nova solicitacao de mudanca",
-    mensagem: `${user.nome} solicitou a mudanca de ${rows.length} bem(ns) para ${departamentoDestino}.`,
+    mensagem: `${user.nome} solicitou a mudanca de ${totalItens} bem(ns) para ${departamentoDestino}.`,
     tipo: "warning",
     link: "movimentacoes",
   })
@@ -268,10 +290,10 @@ export const POST = withAuth(async (request, { user }) => {
   await criarNotificacao({
     roleDestino: "administrador",
     titulo: "Nova solicitacao de mudanca",
-    mensagem: `${user.nome} solicitou a mudanca de ${rows.length} bem(ns) para ${departamentoDestino}.`,
+    mensagem: `${user.nome} solicitou a mudanca de ${totalItens} bem(ns) para ${departamentoDestino}.`,
     tipo: "warning",
     link: "movimentacoes",
   })
 
-  return NextResponse.json({ id: result }, { status: 201 })
+  return NextResponse.json({ id: solicitacaoId }, { status: 201 })
 })

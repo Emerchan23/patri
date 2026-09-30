@@ -635,6 +635,7 @@ export function Emprestimos() {
                       if (fieldErrors.includes("formResponsavelRecebimento")) setFieldErrors(prev => prev.filter(e => e !== "formResponsavelRecebimento"))
                   }}
                   placeholder="Selecione quem recebe"
+                  allowManual
                   className={fieldErrors.includes("formResponsavelRecebimento") ? "border-destructive ring-offset-destructive" : ""}
                 />
               </div>

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nfeProc xmlns="http://www.portalfiscal.inf.br/nfe">
+  <NFe>
+    <infNFe Id="NFe12345678901234567890123456789012345678901234">
+      <ide>
+        <nNF>42</nNF>
+        <serie>3</serie>
+        <dhEmi>2026-09-30T09:30:00-03:00</dhEmi>
+      </ide>
+      <emit>
+        <CNPJ>12345678000199</CNPJ>
+        <xNome>FORNECEDOR TESTE</xNome>
+        <enderEmit>
+          <xLgr>Rua Central</xLgr>
+          <nro>10</nro>
+          <xMun>Chapadão</xMun>
+          <UF>GO</UF>
+        </enderEmit>
+      </emit>
+      <det nItem="1">
+        <prod>
+          <xProd>NOTEBOOK 15 POLEGADAS</xProd>
+          <NCM>84713012</NCM>
+          <CFOP>5102</CFOP>
+          <uCom>UN</uCom>
+          <qCom>2.0000</qCom>
+          <vUnCom>3500.50</vUnCom>
+          <vProd>7001.00</vProd>
+        </prod>
+      </det>
+      <total><ICMSTot><vNF>7001.00</vNF></ICMSTot></total>
+    </infNFe>
+  </NFe>
+</nfeProc>

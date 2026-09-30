@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { execute, query, queryOne, withTransaction } from "@/lib/db"
+import { withTransaction } from "@/lib/db"
 import { withAuth } from "@/lib/api-auth"
 import { registrarLog } from "@/lib/audit"
 import { criarNotificacao } from "@/lib/notifications"
@@ -26,141 +26,94 @@ export const PATCH = withAuth(async (request, { user, params }) => {
   const body = await request.json()
   const action = String(body.action || "").trim()
   const motivoRejeicao = String(body.motivoRejeicao || "").trim()
-
-  const solicitacao = await queryOne<any>(
-    `SELECT *
-       FROM solicitacoes_movimentacao
-      WHERE id = ?`,
-    [id]
-  )
-
-  if (!solicitacao) {
-    return NextResponse.json({ error: "Solicitacao nao encontrada." }, { status: 404 })
-  }
-
-  if (action === "cancelar") {
-    if (user.role !== "assistente" || Number(solicitacao.solicitante_usuario_id) !== Number(user.id)) {
-      return NextResponse.json({ error: "Voce nao pode cancelar esta solicitacao." }, { status: 403 })
-    }
-    if (solicitacao.status !== "pendente") {
-      return NextResponse.json({ error: "Apenas solicitacoes pendentes podem ser canceladas." }, { status: 409 })
-    }
-
-    await execute(
-      `UPDATE solicitacoes_movimentacao
-          SET status = 'cancelada',
-              cancelado_por_usuario_id = ?,
-              cancelado_por_nome = ?,
-              cancelado_em = NOW()
-        WHERE id = ?`,
-      [user.id, user.nome, id]
-    )
-
-    await registrarLog({
-      acao: "cancelamento_solicitacao_movimentacao",
-      descricao: "Solicitacao de mudanca cancelada pelo solicitante",
-      usuarioId: user.id,
-      usuarioNome: user.nome,
-      usuarioRole: user.role,
-      entidadeTipo: "solicitacao_movimentacao",
-      entidadeId: String(id),
-      entidadeDescricao: `Solicitacao ${id}`,
-    })
-
-    return NextResponse.json({ success: true })
-  }
-
-  if (!canManageRequest(user, solicitacao) || !["administrador", "gestor"].includes(String(user.role))) {
-    return NextResponse.json({ error: "Sem permissao para decidir esta solicitacao." }, { status: 403 })
-  }
-
-  if (solicitacao.status !== "pendente") {
-    return NextResponse.json({ error: "Esta solicitacao ja foi decidida." }, { status: 409 })
-  }
-
-  const itens = await query<any>(
-    `SELECT *
-       FROM solicitacoes_movimentacao_itens
-      WHERE solicitacao_id = ?
-      ORDER BY id`,
-    [id]
-  )
-
-  if (itens.length === 0) {
-    return NextResponse.json({ error: "Esta solicitacao nao possui itens para processar." }, { status: 409 })
-  }
-
-  if (action === "rejeitar") {
-    if (!motivoRejeicao) {
-      return NextResponse.json({ error: "Informe o motivo da rejeicao." }, { status: 400 })
-    }
-
-    await execute(
-      `UPDATE solicitacoes_movimentacao
-          SET status = 'rejeitada',
-              motivo_rejeicao = ?,
-              rejeitado_por_usuario_id = ?,
-              rejeitado_por_nome = ?,
-              decidido_em = NOW()
-        WHERE id = ?`,
-      [motivoRejeicao, user.id, user.nome, id]
-    )
-
-    await criarNotificacao({
-      usuarioId: Number(solicitacao.solicitante_usuario_id),
-      titulo: "Solicitacao de mudanca rejeitada",
-      mensagem: `${user.nome} rejeitou sua solicitacao: ${motivoRejeicao}`,
-      tipo: "error",
-      link: "movimentacoes",
-    })
-
-    await registrarLog({
-      acao: "rejeicao_solicitacao_movimentacao",
-      descricao: "Solicitacao de mudanca rejeitada",
-      detalhes: motivoRejeicao,
-      usuarioId: user.id,
-      usuarioNome: user.nome,
-      usuarioRole: user.role,
-      entidadeTipo: "solicitacao_movimentacao",
-      entidadeId: String(id),
-      entidadeDescricao: `${itens.length} bem(ns)`,
-    })
-
-    return NextResponse.json({ success: true })
-  }
-
-  if (action !== "aprovar") {
+  if (!["cancelar", "rejeitar", "aprovar"].includes(action)) {
     return NextResponse.json({ error: "Acao invalida." }, { status: 400 })
   }
-
-  const bensAtuais = await query<any>(
-    `SELECT id, descricao, patrimonio, localizacao_secretaria, localizacao_departamento, localizacao_sala
-       FROM bens
-      WHERE id IN (${itens.map(() => "?").join(",")})`,
-    itens.map((item: any) => item.bem_id)
-  )
-
-  for (const item of itens) {
-    const currentAsset = bensAtuais.find((bem) => Number(bem.id) === Number(item.bem_id))
-    if (!currentAsset) {
-      return NextResponse.json({ error: `O bem ${item.patrimonio} nao foi encontrado para aprovacao.` }, { status: 409 })
-    }
-    const movedSinceRequest =
-      String(currentAsset.localizacao_secretaria || "") !== String(item.de_secretaria || "") ||
-      String(currentAsset.localizacao_departamento || "") !== String(item.de_departamento || "") ||
-      String(currentAsset.localizacao_sala || "") !== String(item.de_sala || "")
-
-    if (movedSinceRequest) {
-      return NextResponse.json(
-        {
-          error: `O bem ${item.patrimonio} ja mudou de local desde a solicitacao. Revise antes de aprovar.`,
-        },
-        { status: 409 }
-      )
-    }
+  if (action === "rejeitar" && !motivoRejeicao) {
+    return NextResponse.json({ error: "Informe o motivo da rejeicao." }, { status: 400 })
   }
 
-  await withTransaction(async (connection) => {
+  const outcome = await withTransaction(async (connection) => {
+    const [requestRows] = await connection.execute(
+      `SELECT * FROM solicitacoes_movimentacao WHERE id = ? FOR UPDATE`,
+      [id]
+    )
+    const solicitacao = (requestRows as any[])[0]
+    if (!solicitacao) return { error: "Solicitacao nao encontrada.", status: 404 as const }
+
+    if (action === "cancelar") {
+      if (user.role !== "assistente" || Number(solicitacao.solicitante_usuario_id) !== Number(user.id)) {
+        return { error: "Voce nao pode cancelar esta solicitacao.", status: 403 as const }
+      }
+      if (solicitacao.status !== "pendente") {
+        return { error: "Apenas solicitacoes pendentes podem ser canceladas.", status: 409 as const }
+      }
+
+      await connection.execute(
+        `UPDATE solicitacoes_movimentacao
+            SET status = 'cancelada', cancelado_por_usuario_id = ?,
+                cancelado_por_nome = ?, cancelado_em = NOW()
+          WHERE id = ? AND status = 'pendente'`,
+        [user.id, user.nome, id]
+      )
+      return { action, solicitacao, itens: [] as any[] }
+    }
+
+    if (!canManageRequest(user, solicitacao) || !["administrador", "gestor"].includes(String(user.role))) {
+      return { error: "Sem permissao para decidir esta solicitacao.", status: 403 as const }
+    }
+    if (solicitacao.status !== "pendente") {
+      return { error: "Esta solicitacao ja foi decidida.", status: 409 as const }
+    }
+
+    const [itemRows] = await connection.execute(
+      `SELECT * FROM solicitacoes_movimentacao_itens
+        WHERE solicitacao_id = ? ORDER BY bem_id FOR UPDATE`,
+      [id]
+    )
+    const itens = itemRows as any[]
+    if (itens.length === 0) {
+      return { error: "Esta solicitacao nao possui itens para processar.", status: 409 as const }
+    }
+
+    if (action === "rejeitar") {
+      await connection.execute(
+        `UPDATE solicitacoes_movimentacao
+            SET status = 'rejeitada', motivo_rejeicao = ?,
+                rejeitado_por_usuario_id = ?, rejeitado_por_nome = ?, decidido_em = NOW()
+          WHERE id = ? AND status = 'pendente'`,
+        [motivoRejeicao, user.id, user.nome, id]
+      )
+      return { action, solicitacao, itens }
+    }
+
+    const bemIds = itens.map((item) => item.bem_id)
+    const [assetRows] = await connection.execute(
+      `SELECT id, descricao, patrimonio, localizacao_secretaria, localizacao_departamento, localizacao_sala
+         FROM bens WHERE id IN (${bemIds.map(() => "?").join(",")})
+        ORDER BY id FOR UPDATE`,
+      bemIds
+    )
+    const bensAtuais = assetRows as any[]
+
+    for (const item of itens) {
+      const currentAsset = bensAtuais.find((bem) => Number(bem.id) === Number(item.bem_id))
+      if (!currentAsset) {
+        return { error: `O bem ${item.patrimonio} nao foi encontrado para aprovacao.`, status: 409 as const }
+      }
+      const movedSinceRequest =
+        String(currentAsset.localizacao_secretaria || "") !== String(item.de_secretaria || "") ||
+        String(currentAsset.localizacao_departamento || "") !== String(item.de_departamento || "") ||
+        String(currentAsset.localizacao_sala || "") !== String(item.de_sala || "")
+
+      if (movedSinceRequest) {
+        return {
+          error: `O bem ${item.patrimonio} ja mudou de local desde a solicitacao. Revise antes de aprovar.`,
+          status: 409 as const,
+        }
+      }
+    }
+
     for (const item of itens) {
       await registrarMovimentacaoInterna(connection, {
         assetId: item.bem_id,
@@ -183,14 +136,54 @@ export const PATCH = withAuth(async (request, { user, params }) => {
 
     await connection.execute(
       `UPDATE solicitacoes_movimentacao
-          SET status = 'aprovada',
-              aprovado_por_usuario_id = ?,
-              aprovado_por_nome = ?,
-              decidido_em = NOW()
-        WHERE id = ?`,
+          SET status = 'aprovada', aprovado_por_usuario_id = ?,
+              aprovado_por_nome = ?, decidido_em = NOW()
+        WHERE id = ? AND status = 'pendente'`,
       [user.id, user.nome, id]
     )
+    return { action, solicitacao, itens }
   })
+
+  if ("error" in outcome) {
+    return NextResponse.json({ error: outcome.error }, { status: outcome.status })
+  }
+
+  if (action === "cancelar") {
+    await registrarLog({
+      acao: "cancelamento_solicitacao_movimentacao",
+      descricao: "Solicitacao de mudanca cancelada pelo solicitante",
+      usuarioId: user.id,
+      usuarioNome: user.nome,
+      usuarioRole: user.role,
+      entidadeTipo: "solicitacao_movimentacao",
+      entidadeId: String(id),
+      entidadeDescricao: `Solicitacao ${id}`,
+    })
+    return NextResponse.json({ success: true })
+  }
+
+  const { solicitacao, itens } = outcome
+  if (action === "rejeitar") {
+    await criarNotificacao({
+      usuarioId: Number(solicitacao.solicitante_usuario_id),
+      titulo: "Solicitacao de mudanca rejeitada",
+      mensagem: `${user.nome} rejeitou sua solicitacao: ${motivoRejeicao}`,
+      tipo: "error",
+      link: "movimentacoes",
+    })
+    await registrarLog({
+      acao: "rejeicao_solicitacao_movimentacao",
+      descricao: "Solicitacao de mudanca rejeitada",
+      detalhes: motivoRejeicao,
+      usuarioId: user.id,
+      usuarioNome: user.nome,
+      usuarioRole: user.role,
+      entidadeTipo: "solicitacao_movimentacao",
+      entidadeId: String(id),
+      entidadeDescricao: `${itens.length} bem(ns)`,
+    })
+    return NextResponse.json({ success: true })
+  }
 
   await criarNotificacao({
     usuarioId: Number(solicitacao.solicitante_usuario_id),
@@ -199,7 +192,6 @@ export const PATCH = withAuth(async (request, { user, params }) => {
     tipo: "success",
     link: "movimentacoes",
   })
-
   await registrarLog({
     acao: "aprovacao_solicitacao_movimentacao",
     descricao: "Solicitacao de mudanca aprovada e aplicada",

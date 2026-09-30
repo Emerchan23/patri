@@ -3,7 +3,7 @@ import { query, withTransaction } from "@/lib/db"
 import { withAuth, withPermission } from "@/lib/api-auth"
 import { registrarLog } from "@/lib/audit"
 import { criarNotificacao } from "@/lib/notifications"
-import { appendScopeClause, assertAssetAccess, getTransferScopeClause, isLocationInScope } from "@/lib/asset-scope"
+import { appendScopeClause, getTransferScopeClause, isLocationInScope } from "@/lib/asset-scope"
 import { registrarMovimentacaoInterna } from "@/lib/movimentacao-service"
 import { buildSmartSearch } from "@/lib/smart-search"
 
@@ -121,7 +121,19 @@ export const GET = withAuth(async (request, { user }) => {
 // POST /api/movimentacoes
 export const POST = withPermission("registrarMovimentacao", async (request, { user }) => {
   const body = await request.json()
-  if (!isLocationInScope(user, body.para)) {
+  const destination = body?.para
+  if (
+    !destination ||
+    !["secretaria", "departamento", "sala"].every(
+      (field) => typeof destination[field] === "string" && destination[field].trim(),
+    )
+  ) {
+    return NextResponse.json({ error: "Selecione secretaria, departamento e sala de destino" }, { status: 400 })
+  }
+  if (typeof body?.motivo !== "string" || !body.motivo.trim()) {
+    return NextResponse.json({ error: "Motivo e obrigatorio" }, { status: 400 })
+  }
+  if (!isLocationInScope(user, destination)) {
     return NextResponse.json({ error: "Sem permissao para movimentar bem para este destino" }, { status: 403 })
   }
 
@@ -137,29 +149,49 @@ export const POST = withPermission("registrarMovimentacao", async (request, { us
   }
 
   const placeholders = assetIds.map(() => "?").join(", ")
-  const assetRows = await query<any>(
-    `SELECT id, descricao, patrimonio, patrimonio_provisorio,
-            localizacao_secretaria, localizacao_departamento, localizacao_sala
-       FROM bens
-      WHERE id IN (${placeholders})`,
-    assetIds,
-  )
-  const assetsById = new Map(assetRows.map((asset) => [String(asset.id), asset]))
+  const transaction = await withTransaction(async (connection) => {
+    const [rows] = await connection.execute(
+      `SELECT id, descricao, patrimonio, patrimonio_provisorio,
+              localizacao_secretaria, localizacao_departamento, localizacao_sala
+         FROM bens
+        WHERE id IN (${placeholders})
+        ORDER BY id
+        FOR UPDATE`,
+      assetIds,
+    )
+    const assetRows = rows as Array<{
+      id: number
+      descricao: string
+      patrimonio: string | null
+      patrimonio_provisorio: string | null
+      localizacao_secretaria: string | null
+      localizacao_departamento: string | null
+      localizacao_sala: string | null
+    }>
+    const assetsById = new Map(assetRows.map((asset) => [String(asset.id), asset]))
+    if (assetsById.size !== assetIds.length) return { error: "missing" as const }
+    if (
+      assetRows.some(
+        (asset) =>
+          !isLocationInScope(user, {
+            secretaria: asset.localizacao_secretaria,
+            departamento: asset.localizacao_departamento,
+          }),
+      )
+    ) return { error: "forbidden" as const }
+    if (
+      assetRows.some(
+        (asset) =>
+          asset.localizacao_secretaria === destination.secretaria &&
+          asset.localizacao_departamento === destination.departamento &&
+          asset.localizacao_sala === destination.sala,
+      )
+    ) return { error: "already_there" as const }
 
-  if (assetsById.size !== assetIds.length) {
-    return NextResponse.json({ error: "Um ou mais bens selecionados não foram encontrados" }, { status: 404 })
-  }
-
-  try {
-    await Promise.all(assetIds.map((assetId) => assertAssetAccess(user, assetId)))
-  } catch {
-    return NextResponse.json({ error: "Sem permissao para movimentar um dos bens selecionados" }, { status: 403 })
-  }
-
-  const results = await withTransaction(async (connection) => {
     const movementResults = []
     for (const assetId of assetIds) {
       const asset = assetsById.get(assetId)
+      if (!asset) continue
       movementResults.push(await registrarMovimentacaoInterna(connection, {
         assetId,
         assetDescricao: asset.descricao,
@@ -169,20 +201,33 @@ export const POST = withPermission("registrarMovimentacao", async (request, { us
           departamento: asset.localizacao_departamento,
           sala: asset.localizacao_sala,
         },
-        para: body.para,
-        responsavel: body.responsavel,
+        para: destination,
+        responsavel: user.nome,
         motivo: body.motivo,
         data: body.data,
       }))
     }
-    return movementResults
+    return { results: movementResults, assetsById }
   })
+
+  if ("error" in transaction) {
+    if (transaction.error === "missing") {
+      return NextResponse.json({ error: "Um ou mais bens selecionados não foram encontrados" }, { status: 404 })
+    }
+    if (transaction.error === "forbidden") {
+      return NextResponse.json({ error: "Sem permissao para movimentar um dos bens selecionados" }, { status: 403 })
+    }
+    return NextResponse.json({ error: "Um ou mais bens ja estao no local de destino" }, { status: 400 })
+  }
+
+  const { results, assetsById } = transaction
 
   for (let index = 0; index < results.length; index += 1) {
     const asset = assetsById.get(assetIds[index])
+    if (!asset) continue
     await registrarLog({
       acao: "transferencia",
-      descricao: `Transferencia: ${asset.descricao} - ${asset.localizacao_departamento || ""} para ${body.para?.departamento || ""}`,
+      descricao: `Transferencia: ${asset.descricao} - ${asset.localizacao_departamento || ""} para ${destination.departamento || ""}`,
       detalhes: `Movimentação conjunta com ${results.length} bem(ns). Motivo: ${body.motivo}`,
       usuarioId: user.id,
       usuarioNome: user.nome,
@@ -191,14 +236,14 @@ export const POST = withPermission("registrarMovimentacao", async (request, { us
       entidadeId: String(results[index].insertId),
       entidadeDescricao: asset.descricao,
       dadosAnteriores: { secretaria: asset.localizacao_secretaria, departamento: asset.localizacao_departamento, sala: asset.localizacao_sala },
-      dadosNovos: { secretaria: body.para?.secretaria, departamento: body.para?.departamento, sala: body.para?.sala },
+      dadosNovos: { secretaria: destination.secretaria, departamento: destination.departamento, sala: destination.sala },
     })
   }
 
   await criarNotificacao({
     roleDestino: "assistente",
     titulo: "Movimentacao registrada",
-    mensagem: `${results.length} bem(ns) foram transferidos para ${body.para?.departamento}.`,
+    mensagem: `${results.length} bem(ns) foram transferidos para ${destination.departamento}.`,
     tipo: "info",
     link: "movimentacoes",
   })

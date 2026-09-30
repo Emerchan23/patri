@@ -1,12 +1,12 @@
 
 import { NextResponse } from 'next/server';
-import { withAuth } from '@/lib/api-auth';
+import { withRole } from '@/lib/api-auth';
 import fs from 'fs';
 import path from 'path';
 
 const BACKUP_DIR = path.join(process.cwd(), 'public', 'backup');
 
-export const GET = withAuth(async () => {
+export const GET = withRole(['administrador'], async () => {
   try {
     if (!fs.existsSync(BACKUP_DIR)) {
       return NextResponse.json([]);

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { query, queryOne, execute } from "@/lib/db"
+import { withTransaction } from "@/lib/db"
 import { withPermission } from "@/lib/api-auth"
 
 // POST /api/alienacoes/[id]/itens - Adicionar item
@@ -10,40 +10,51 @@ export const POST = withPermission("gerenciarAlienacoes", async (
   try {
     const { bem_id } = await request.json()
     const alienacaoId = params?.id
-
-    // Verificar se alienacao existe e esta aberta
-    const alienacao = await queryOne<any>("SELECT status FROM alienacoes WHERE id = ?", [alienacaoId])
-    if (!alienacao || alienacao.status === 'concluido') {
-      return NextResponse.json({ error: "Alienacao nao encontrada ou ja concluida" }, { status: 400 })
+    if (!Number.isInteger(Number(bem_id)) || Number(bem_id) <= 0) {
+      return NextResponse.json({ error: "ID do bem invalido" }, { status: 400 })
     }
 
-    // Verificar se bem existe
-    const bem = await queryOne<any>("SELECT id, valor FROM bens WHERE id = ?", [bem_id])
-    if (!bem) {
-      return NextResponse.json({ error: "Bem nao encontrado" }, { status: 404 })
-    }
+    const result = await withTransaction(async (connection) => {
+      const [processRows] = await connection.execute(
+        "SELECT status FROM alienacoes WHERE id = ? FOR UPDATE",
+        [alienacaoId]
+      )
+      const process = (processRows as Array<{ status: string }>)[0]
+      if (!process || process.status === "concluido" || process.status === "cancelado") return "closed"
 
-    // Verificar se bem ja esta na alienacao
-    const existente = await queryOne<any>("SELECT id FROM alienacao_itens WHERE alienacao_id = ? AND bem_id = ?", [alienacaoId, bem_id])
-    if (existente) {
-      return NextResponse.json({ error: "Bem ja esta na alienacao" }, { status: 400 })
-    }
+      const [assetRows] = await connection.execute(
+        "SELECT id, valor, status FROM bens WHERE id = ? FOR UPDATE",
+        [bem_id]
+      )
+      const asset = (assetRows as Array<{ id: number; valor: number | string; status: string }>)[0]
+      if (!asset) return "asset_missing"
+      if (asset.status !== "ativo") return "asset_unavailable"
 
-    // Adicionar item
-    await execute(
-      `INSERT INTO alienacao_itens (alienacao_id, bem_id, valor_aquisicao, valor_contabil, valor_avaliacao, status_item) 
-       VALUES (?, ?, ?, ?, ?, 'pendente')`,
-      [alienacaoId, bem.id, bem.valor, bem.valor, bem.valor]
-    )
+      const [existingRows] = await connection.execute(
+        "SELECT id FROM alienacao_itens WHERE alienacao_id = ? AND bem_id = ? FOR UPDATE",
+        [alienacaoId, bem_id]
+      )
+      if ((existingRows as unknown[]).length > 0) return "duplicate"
 
-    // Atualizar totais da alienacao
-    await execute(
-      `UPDATE alienacoes a 
-       SET valor_total_avaliacao = (SELECT SUM(valor_avaliacao) FROM alienacao_itens WHERE alienacao_id = a.id),
-           valor_total_itens = (SELECT COUNT(*) FROM alienacao_itens WHERE alienacao_id = a.id)
-       WHERE id = ?`,
-      [alienacaoId]
-    )
+      await connection.execute(
+        `INSERT INTO alienacao_itens (alienacao_id, bem_id, valor_aquisicao, valor_contabil, valor_avaliacao, status_item)
+         VALUES (?, ?, ?, ?, ?, 'pendente')`,
+        [alienacaoId, asset.id, asset.valor, asset.valor, asset.valor]
+      )
+      await connection.execute(
+        `UPDATE alienacoes a
+         SET valor_total_avaliacao = (SELECT COALESCE(SUM(valor_avaliacao), 0) FROM alienacao_itens WHERE alienacao_id = a.id),
+             valor_total_itens = (SELECT COUNT(*) FROM alienacao_itens WHERE alienacao_id = a.id)
+         WHERE id = ?`,
+        [alienacaoId]
+      )
+      return "ok"
+    })
+
+    if (result === "closed") return NextResponse.json({ error: "Alienacao nao encontrada ou encerrada" }, { status: 400 })
+    if (result === "asset_missing") return NextResponse.json({ error: "Bem nao encontrado" }, { status: 404 })
+    if (result === "asset_unavailable") return NextResponse.json({ error: "Somente bens ativos podem ser vinculados" }, { status: 400 })
+    if (result === "duplicate") return NextResponse.json({ error: "Bem ja esta na alienacao" }, { status: 400 })
 
     return NextResponse.json({ message: "Item adicionado com sucesso" })
   } catch (error) {
@@ -66,17 +77,33 @@ export const DELETE = withPermission("gerenciarAlienacoes", async (
         return NextResponse.json({ error: "ID do bem necessario" }, { status: 400 })
     }
 
-    // Remover item
-    await execute("DELETE FROM alienacao_itens WHERE alienacao_id = ? AND bem_id = ?", [alienacaoId, bem_id])
+    const result = await withTransaction(async (connection) => {
+      const [processRows] = await connection.execute(
+        "SELECT status FROM alienacoes WHERE id = ? FOR UPDATE",
+        [alienacaoId]
+      )
+      const process = (processRows as Array<{ status: string }>)[0]
+      if (!process) return "not_found"
+      if (process.status === "concluido" || process.status === "cancelado") return "closed"
 
-    // Atualizar totais
-    await execute(
-      `UPDATE alienacoes a 
-       SET valor_total_avaliacao = (SELECT COALESCE(SUM(valor_avaliacao), 0) FROM alienacao_itens WHERE alienacao_id = a.id),
-           valor_total_itens = (SELECT COUNT(*) FROM alienacao_itens WHERE alienacao_id = a.id)
-       WHERE id = ?`,
-      [alienacaoId]
-    )
+      const [deleteResult] = await connection.execute(
+        "DELETE FROM alienacao_itens WHERE alienacao_id = ? AND bem_id = ? AND status_item = 'pendente'",
+        [alienacaoId, bem_id]
+      )
+      if ((deleteResult as { affectedRows: number }).affectedRows === 0) return "item_missing"
+      await connection.execute(
+        `UPDATE alienacoes a
+         SET valor_total_avaliacao = (SELECT COALESCE(SUM(valor_avaliacao), 0) FROM alienacao_itens WHERE alienacao_id = a.id),
+             valor_total_itens = (SELECT COUNT(*) FROM alienacao_itens WHERE alienacao_id = a.id)
+         WHERE id = ?`,
+        [alienacaoId]
+      )
+      return "ok"
+    })
+
+    if (result === "not_found") return NextResponse.json({ error: "Alienacao nao encontrada" }, { status: 404 })
+    if (result === "closed") return NextResponse.json({ error: "Alienacao encerrada nao pode ser alterada" }, { status: 400 })
+    if (result === "item_missing") return NextResponse.json({ error: "Bem pendente nao encontrado neste processo" }, { status: 404 })
 
     return NextResponse.json({ message: "Item removido com sucesso" })
 

@@ -3,12 +3,12 @@ import { mkdir, readFile, writeFile } from "fs/promises"
 import path from "path"
 import crypto from "crypto"
 import { queryOne, execute } from "@/lib/db"
-import { withAuth } from "@/lib/api-auth"
+import { withPermission } from "@/lib/api-auth"
 import { getTransferScopeClause } from "@/lib/asset-scope"
 import { ensureTermosResponsabilidadeSchema } from "@/lib/termos-responsabilidade-schema"
 import { registrarLog } from "@/lib/audit"
 
-export const POST = withAuth(async (request, { user, params }) => {
+export const POST = withPermission("gerenciarEmprestimos", async (request, { user, params }) => {
   await ensureTermosResponsabilidadeSchema()
   const id = params?.id
   const scope = getTransferScopeClause(user, {
@@ -62,7 +62,7 @@ export const POST = withAuth(async (request, { user, params }) => {
   return NextResponse.json({ success: true, arquivoAssinado: publicPath, assinadoEm: new Date().toISOString() })
 })
 
-export const GET = withAuth(async (request, { user, params }) => {
+export const GET = withPermission("gerenciarEmprestimos", async (request, { user, params }) => {
   await ensureTermosResponsabilidadeSchema()
   const id = params?.id
   const scope = getTransferScopeClause(user, {

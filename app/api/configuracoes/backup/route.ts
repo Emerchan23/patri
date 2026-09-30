@@ -1,25 +1,31 @@
 import { NextResponse } from 'next/server';
-import { execute, queryOne } from '@/lib/db';
-import { withAuth } from '@/lib/api-auth';
+import { execute, query, queryOne } from '@/lib/db';
+import { withRole } from '@/lib/api-auth';
 import { reloadSchedule } from '@/lib/backup-scheduler';
 
-// Ensure table exists (similar to system settings)
-async function ensureTableExists() {
-    await execute(`
-      CREATE TABLE IF NOT EXISTS backup_settings (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        enabled BOOLEAN DEFAULT FALSE,
-        frequency VARCHAR(20) DEFAULT 'daily',
-        time VARCHAR(5) DEFAULT '00:00',
-        keep_count INT DEFAULT 7,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-    `);
+const REQUIRED_COLUMNS = ['id', 'enabled', 'frequency', 'time', 'keep_count'];
+
+async function hasBackupSettingsSchema() {
+  const rows = await query<{ COLUMN_NAME: string }>(
+    `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
+    ['backup_settings'],
+  );
+  const columns = new Set(rows.map((row) => row.COLUMN_NAME.toLowerCase()));
+  return REQUIRED_COLUMNS.every((column) => columns.has(column));
 }
 
-export const GET = withAuth(async () => {
-  await ensureTableExists();
-  
+function schemaUnavailable() {
+  return NextResponse.json(
+    { error: 'A configuração de backups não está instalada neste banco.' },
+    { status: 409 },
+  );
+}
+
+export const GET = withRole(['administrador'], async () => {
+  if (!(await hasBackupSettingsSchema())) return schemaUnavailable();
+
   const settings = await queryOne("SELECT * FROM backup_settings LIMIT 1");
   
   if (!settings) {
@@ -34,9 +40,45 @@ export const GET = withAuth(async () => {
   return NextResponse.json(settings);
 });
 
-export const PUT = withAuth(async (request) => {
-  await ensureTableExists();
-  const body = await request.json();
+export const PUT = withRole(['administrador'], async (request) => {
+  if (!(await hasBackupSettingsSchema())) return schemaUnavailable();
+
+  let body: Record<string, unknown>;
+  try {
+    const payload: unknown = await request.json();
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return NextResponse.json({ error: 'Corpo da solicitação inválido.' }, { status: 400 });
+    }
+    body = payload as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ error: 'JSON inválido.' }, { status: 400 });
+  }
+
+  const validFrequency = ['daily', 'weekly', 'monthly'].includes(
+    String(body.frequency),
+  );
+  const validTime =
+    typeof body.time === 'string' &&
+    /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(body.time);
+  const validKeepCount =
+    Number.isInteger(body.keep_count) &&
+    Number(body.keep_count) >= 1 &&
+    Number(body.keep_count) <= 30;
+
+  if (
+    typeof body.enabled !== 'boolean' ||
+    !validFrequency ||
+    !validTime ||
+    !validKeepCount
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          'Informe enabled booleano, frequência diária/semanal/mensal, horário HH:mm e retenção entre 1 e 30 backups.',
+      },
+      { status: 400 },
+    );
+  }
 
   const existing = await queryOne<{ id: number }>("SELECT id FROM backup_settings LIMIT 1");
 

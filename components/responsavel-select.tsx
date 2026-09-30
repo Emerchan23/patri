@@ -38,6 +38,7 @@ interface ResponsavelSelectProps {
   disabled?: boolean
   onSelect?: (servidor: any) => void
   className?: string
+  allowManual?: boolean
 }
 
 export function ResponsavelSelect({
@@ -47,6 +48,7 @@ export function ResponsavelSelect({
   disabled = false,
   onSelect,
   className,
+  allowManual = false,
 }: ResponsavelSelectProps) {
   const { toast } = useToast()
   // Changed to fetch all to ensure full list is available for search and selection
@@ -60,6 +62,7 @@ export function ResponsavelSelect({
   const [cargo, setCargo] = useState("")
   const [cpf, setCpf] = useState("")
   const [deletingId, setDeletingId] = useState<number | string | null>(null)
+  const [manualMode, setManualMode] = useState(false)
 
   const handleCreate = async () => {
     if (!nome || !cargo) {
@@ -142,25 +145,47 @@ export function ResponsavelSelect({
   return (
     <div className="flex items-center gap-2">
       <div className="flex-1">
-        <SearchableSelect
-          className={className}
-          value={value}
-          onValueChange={(val) => {
-            onValueChange(val)
-            if (onSelect) {
-              const selected = items.find((i: any) => i.value === val)
-              if (selected) onSelect(selected.original)
-            }
-          }}
-          disabled={disabled}
-          placeholder={placeholder}
-          searchPlaceholder="Buscar responsável..."
-          items={items.map((i: any) => ({
-            value: i.value,
-            label: i.label,
-          }))}
-        />
+        {manualMode ? (
+          <Input
+            value={value}
+            onChange={(event) => onValueChange(event.target.value)}
+            disabled={disabled}
+            placeholder="Digite o nome do responsável"
+            className={className}
+          />
+        ) : (
+          <SearchableSelect
+            className={className}
+            value={value}
+            onValueChange={(val) => {
+              onValueChange(val)
+              if (onSelect) {
+                const selected = items.find((i: any) => i.value === val)
+                if (selected) onSelect(selected.original)
+              }
+            }}
+            disabled={disabled}
+            placeholder={placeholder}
+            searchPlaceholder="Buscar responsável..."
+            items={items.map((i: any) => ({
+              value: i.value,
+              label: i.label,
+            }))}
+          />
+        )}
       </div>
+      {allowManual && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={disabled}
+          onClick={() => setManualMode((current) => !current)}
+          title={manualMode ? "Selecionar responsável cadastrado" : "Digitar responsável manualmente"}
+        >
+          {manualMode ? "Buscar" : "Digitar"}
+        </Button>
+      )}
       <Dialog open={open} onOpenChange={(o) => {
         setOpen(o)
         if (!o) setView("list") // Reset to list view when closed
