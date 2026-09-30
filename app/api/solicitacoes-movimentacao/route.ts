@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server"
-import { query, queryOne, withTransaction } from "@/lib/db"
+import { query, withTransaction } from "@/lib/db"
 import { withAuth } from "@/lib/api-auth"
 import { registrarLog } from "@/lib/audit"
 import { criarNotificacao } from "@/lib/notifications"
 import { ensureMovimentacaoSolicitacaoSchema } from "@/lib/movimentacao-solicitacao-schema"
 import { appendScopeClause, getAssetScopeClause } from "@/lib/asset-scope"
+import { findCanonicalLocation, sameLocation } from "@/lib/location-match"
 
 function getRequestScope(user: { role: string; id: number; unidade_secretaria?: string | null; secretariasGerenciadas?: string[] }) {
   if (user.role === "administrador") {
@@ -25,18 +26,6 @@ function getRequestScope(user: { role: string; id: number; unidade_secretaria?: 
     clause: "sm.solicitante_usuario_id = ?",
     params: [user.id],
   }
-}
-
-async function validateDestination(secretaria: string, departamento: string, sala: string) {
-  const row = await queryOne<{ secretaria_nome: string; departamento_nome: string; sala_nome: string }>(
-    `SELECT sec.nome as secretaria_nome, d.nome as departamento_nome, s.nome as sala_nome
-       FROM salas s
-       JOIN departamentos d ON d.id = s.departamento_id
-       JOIN secretarias sec ON sec.id = d.secretaria_id
-      WHERE sec.nome = ? AND d.nome = ? AND s.nome = ?`,
-    [secretaria, departamento, sala]
-  )
-  return !!row
 }
 
 export const GET = withAuth(async (request, { user }) => {
@@ -180,15 +169,21 @@ export const POST = withAuth(async (request, { user }) => {
     return NextResponse.json({ error: "O destino precisa estar dentro da mesma secretaria da unidade." }, { status: 403 })
   }
 
-  const destinationExists = await validateDestination(secretariaDestino, departamentoDestino, salaDestino)
-  if (!destinationExists) {
-    return NextResponse.json({ error: "Destino informado nao existe ou nao pertence a secretaria selecionada." }, { status: 400 })
-  }
-
   const scope = getAssetScopeClause(user)
   const placeholders = assetIds.map(() => "?").join(", ")
-  const normalizedPlace = (value: unknown) => String(value || "").trim().toLocaleLowerCase("pt-BR").replace(/\s+/g, " ")
   const result = await withTransaction(async (connection) => {
+    const destination = await findCanonicalLocation(connection, {
+      secretaria: secretariaDestino,
+      departamento: departamentoDestino,
+      sala: salaDestino,
+    })
+    if (!destination) {
+      return { error: "Destino informado não existe ou está duplicado. Atualize a lista de locais e tente novamente.", status: 400 as const }
+    }
+    if (destination.secretaria !== user.unidade_secretaria) {
+      return { error: "O destino precisa estar dentro da mesma secretaria da unidade.", status: 403 as const }
+    }
+
     const [assetRows] = await connection.execute(
       `SELECT id, patrimonio, descricao, localizacao_secretaria, localizacao_departamento, localizacao_sala
          FROM bens
@@ -208,9 +203,14 @@ export const POST = withAuth(async (request, { user }) => {
     }
 
     const alreadyAtDestination = rows.filter((row) =>
-      normalizedPlace(row.localizacao_secretaria) === normalizedPlace(secretariaDestino) &&
-      normalizedPlace(row.localizacao_departamento) === normalizedPlace(departamentoDestino) &&
-      normalizedPlace(row.localizacao_sala) === normalizedPlace(salaDestino)
+      sameLocation(
+        {
+          secretaria: row.localizacao_secretaria,
+          departamento: row.localizacao_departamento,
+          sala: row.localizacao_sala,
+        },
+        destination,
+      )
     )
     if (alreadyAtDestination.length > 0) {
       const codes = alreadyAtDestination.map((row) => row.patrimonio || row.id).join(", ")
@@ -226,9 +226,9 @@ export const POST = withAuth(async (request, { user }) => {
         user.nome,
         user.role,
         user.unidade_secretaria,
-        secretariaDestino,
-        departamentoDestino,
-        salaDestino,
+        destination.secretaria,
+        destination.departamento,
+        destination.sala,
         motivo,
       ]
     )
@@ -252,18 +252,18 @@ export const POST = withAuth(async (request, { user }) => {
       )
     }
 
-    return { solicitacaoId, totalItens: rows.length }
+    return { solicitacaoId, totalItens: rows.length, destination }
   })
 
   if ("error" in result) {
     return NextResponse.json({ error: result.error }, { status: result.status })
   }
-  const { solicitacaoId, totalItens } = result
+  const { solicitacaoId, totalItens, destination } = result
 
   await registrarLog({
     acao: "solicitacao_movimentacao",
     descricao: `Solicitacao de mudanca criada para ${totalItens} bem(ns)`,
-    detalhes: `Destino: ${departamentoDestino} / ${salaDestino}. Motivo: ${motivo}`,
+    detalhes: `Destino: ${destination.departamento} / ${destination.sala}. Motivo: ${motivo}`,
     usuarioId: user.id,
     usuarioNome: user.nome,
     usuarioRole: user.role,
@@ -272,9 +272,9 @@ export const POST = withAuth(async (request, { user }) => {
     entidadeDescricao: `${totalItens} bem(ns)`,
     dadosNovos: {
       assetIds,
-      secretariaDestino,
-      departamentoDestino,
-      salaDestino,
+      secretariaDestino: destination.secretaria,
+      departamentoDestino: destination.departamento,
+      salaDestino: destination.sala,
       motivo,
     },
   })
@@ -282,7 +282,7 @@ export const POST = withAuth(async (request, { user }) => {
   await criarNotificacao({
     roleDestino: "gestor",
     titulo: "Nova solicitacao de mudanca",
-    mensagem: `${user.nome} solicitou a mudanca de ${totalItens} bem(ns) para ${departamentoDestino}.`,
+    mensagem: `${user.nome} solicitou a mudanca de ${totalItens} bem(ns) para ${destination.departamento}.`,
     tipo: "warning",
     link: "movimentacoes",
   })
@@ -290,7 +290,7 @@ export const POST = withAuth(async (request, { user }) => {
   await criarNotificacao({
     roleDestino: "administrador",
     titulo: "Nova solicitacao de mudanca",
-    mensagem: `${user.nome} solicitou a mudanca de ${totalItens} bem(ns) para ${departamentoDestino}.`,
+    mensagem: `${user.nome} solicitou a mudanca de ${totalItens} bem(ns) para ${destination.departamento}.`,
     tipo: "warning",
     link: "movimentacoes",
   })
