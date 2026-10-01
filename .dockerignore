@@ -39,6 +39,8 @@ next-env.d.ts
 Dockerfile
 docker-compose*.yml
 uploads/
+/public/uploads/
+/public/backup/
 
 # Flutter is packaged and distributed separately from the Next.js server.
 /mobile/
