@@ -4,6 +4,56 @@ import 'package:sis_patrimonio_mobile/screens/vehicles_screen.dart';
 import 'package:sis_patrimonio_mobile/services/api_service.dart';
 
 void main() {
+  testWidgets('gestor edita dados do veículo pela interface móvel', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final api = _VehiclesApiFake(
+      session: const CurrentUserSession(
+        id: 'manager-1',
+        nome: 'Gestor de teste',
+        role: 'administrador',
+      ),
+    );
+    await tester.pumpWidget(MaterialApp(home: VehiclesScreen(apiService: api)));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    expect(find.byTooltip('Editar veículo'), findsOneWidget);
+    await tester.tap(find.byTooltip('Editar veículo').first);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Editar veículo'), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('vehicle-edit-plate')),
+      'NEW1A23',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('vehicle-edit-year')),
+      '2025',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('vehicle-edit-mileage')),
+      '50000',
+    );
+    await tester.ensureVisible(find.text('Salvar'));
+    await tester.tap(find.text('Salvar'));
+    await tester.pumpAndSettle();
+
+    expect(api.updatedVehicleId, 'vehicle-1');
+    expect(api.updatedData?['placa'], 'NEW1A23');
+    expect(api.updatedData?['ano'], 2025);
+    expect(api.updatedData?['kmAtual'], 50000);
+    expect(api.updatedData?['status'], 'ativo');
+    expect(find.text('Veículo atualizado.'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('cartão de veículo rola em tela estreita e texto ampliado', (
     tester,
   ) async {
@@ -30,6 +80,7 @@ void main() {
     expect(find.text('SEDAN DE SERVIÇO MUNICIPAL'), findsOneWidget);
     expect(find.text('ABC1D23'), findsOneWidget);
     expect(find.text('Quilometragem'), findsOneWidget);
+    expect(find.byTooltip('Editar veículo'), findsNothing);
 
     await tester.enterText(
       find.byKey(const ValueKey('vehicle-search')),
@@ -108,6 +159,8 @@ class _VehiclesApiFake extends ApiService {
   final Set<String> _deletedIds = {};
   String? deletedVehicleId;
   String? deleteReason;
+  String? updatedVehicleId;
+  Map<String, dynamic>? updatedData;
 
   _VehiclesApiFake({
     this.session = const CurrentUserSession(
@@ -160,5 +213,14 @@ class _VehiclesApiFake extends ApiService {
     deletedVehicleId = id;
     deleteReason = reason;
     _deletedIds.add(id);
+  }
+
+  @override
+  Future<void> updateVehicle(
+    String id, {
+    required Map<String, dynamic> data,
+  }) async {
+    updatedVehicleId = id;
+    updatedData = data;
   }
 }

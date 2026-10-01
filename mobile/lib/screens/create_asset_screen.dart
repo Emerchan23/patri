@@ -35,6 +35,10 @@ class _CreateAssetScreenState extends State<CreateAssetScreen> {
   final TextEditingController _valorController = TextEditingController();
   final TextEditingController _modeloController = TextEditingController();
   final TextEditingController _serieController = TextEditingController();
+  final TextEditingController _vehiclePlateController = TextEditingController();
+  final TextEditingController _vehicleYearController = TextEditingController();
+  final TextEditingController _vehicleMileageController =
+      TextEditingController();
   final TextEditingController _numeroController = TextEditingController();
 
   // Patrimonio type
@@ -69,6 +73,9 @@ class _CreateAssetScreenState extends State<CreateAssetScreen> {
   String? _selectedResponsavel;
   String? _selectedFornecedor;
   String _estadoConservacao = 'novo';
+
+  bool get _isVehicleCategory =>
+      (_selectedCategoria ?? '').toLowerCase().startsWith('veicul');
 
   File? _newImage;
   final ImagePicker _picker = ImagePicker();
@@ -265,6 +272,23 @@ class _CreateAssetScreenState extends State<CreateAssetScreen> {
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
 
+    if (_newImage == null) {
+      if (_formScrollController.hasClients) {
+        await _formScrollController.animateTo(
+          0,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeOut,
+        );
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Adicione uma foto do bem para continuar.'),
+        ),
+      );
+      return;
+    }
+
     // Validate location
     if (_selectedSecretariaId == null ||
         _selectedDepartamentoId == null ||
@@ -352,6 +376,11 @@ class _CreateAssetScreenState extends State<CreateAssetScreen> {
         'estadoConservacao': _estadoConservacao,
         'dataAquisicao': DateTime.now().toIso8601String().split('T')[0],
         'quantidade': 1,
+        if (_isVehicleCategory) ...{
+          'placa': _vehiclePlateController.text.trim().toUpperCase(),
+          'ano': int.tryParse(_vehicleYearController.text.trim()),
+          'kmAtual': int.tryParse(_vehicleMileageController.text.trim()),
+        },
       };
 
       final result = await _apiService.createAsset(data);
@@ -455,6 +484,16 @@ class _CreateAssetScreenState extends State<CreateAssetScreen> {
               const SizedBox(height: 20),
               if (_currentStep == 2) ...[
                 // Image Picker
+                const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Padding(
+                    padding: EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      'Foto do bem *',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ),
                 Center(
                   child: GestureDetector(
                     onTap: () {
@@ -507,7 +546,9 @@ class _CreateAssetScreenState extends State<CreateAssetScreen> {
                                   color: Colors.grey,
                                 ),
                                 SizedBox(height: 8),
-                                Text('Toque para adicionar foto'),
+                                Text(
+                                  'Obrigatória: tire uma foto ou escolha da galeria',
+                                ),
                               ],
                             ),
                     ),
@@ -749,6 +790,65 @@ class _CreateAssetScreenState extends State<CreateAssetScreen> {
                     ),
                   ],
                 ),
+                if (_isVehicleCategory) ...[
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    key: const ValueKey('vehicle-registration-plate'),
+                    controller: _vehiclePlateController,
+                    textCapitalization: TextCapitalization.characters,
+                    decoration: const InputDecoration(
+                      labelText: 'Placa do veículo',
+                      border: OutlineInputBorder(),
+                      helperText: 'Opcional para veículos ainda sem placa.',
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          key: const ValueKey('vehicle-registration-year'),
+                          controller: _vehicleYearController,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                            labelText: 'Ano',
+                            border: OutlineInputBorder(),
+                          ),
+                          validator: (value) {
+                            final text = value?.trim() ?? '';
+                            if (text.isEmpty) return null;
+                            final year = int.tryParse(text);
+                            return year == null ||
+                                    year < 1900 ||
+                                    year > DateTime.now().year + 1
+                                ? 'Ano inválido'
+                                : null;
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: TextFormField(
+                          key: const ValueKey('vehicle-registration-mileage'),
+                          controller: _vehicleMileageController,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                            labelText: 'Quilometragem (km)',
+                            border: OutlineInputBorder(),
+                          ),
+                          validator: (value) {
+                            final text = value?.trim() ?? '';
+                            if (text.isEmpty) return null;
+                            final mileage = int.tryParse(text);
+                            return mileage == null || mileage < 0
+                                ? 'Quilometragem inválida'
+                                : null;
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
                 const SizedBox(height: 24),
               ],
 
@@ -977,6 +1077,9 @@ class _CreateAssetScreenState extends State<CreateAssetScreen> {
     _valorController.dispose();
     _modeloController.dispose();
     _serieController.dispose();
+    _vehiclePlateController.dispose();
+    _vehicleYearController.dispose();
+    _vehicleMileageController.dispose();
     _numeroController.dispose();
     _provisorioManualController.dispose();
     _provisorioAnoController.dispose();

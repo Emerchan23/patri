@@ -516,7 +516,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       icon: Icons.label_outline,
                       title: 'Etiquetas provisórias',
                       subtitle:
-                          'Reserve lotes, imprima etiquetas QR e libere saldo não utilizado.',
+                          'Reserve lotes, gere PDF com QR e libere saldo não utilizado.',
                       accentColor: const Color(0xFF0369A1),
                       onTap: () => Navigator.push(
                         context,

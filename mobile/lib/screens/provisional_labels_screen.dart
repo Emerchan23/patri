@@ -1,13 +1,21 @@
-import 'dart:typed_data';
-
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
-import 'package:printing/printing.dart';
 import 'package:sis_patrimonio_mobile/services/api_service.dart';
 
+typedef PdfSaveCallback =
+    Future<String?> Function({
+      required Uint8List bytes,
+      required String filename,
+    });
+
 class ProvisionalLabelsScreen extends StatefulWidget {
-  const ProvisionalLabelsScreen({super.key});
+  const ProvisionalLabelsScreen({super.key, this.apiService, this.savePdf});
+
+  final ApiService? apiService;
+  final PdfSaveCallback? savePdf;
 
   @override
   State<ProvisionalLabelsScreen> createState() =>
@@ -15,7 +23,8 @@ class ProvisionalLabelsScreen extends StatefulWidget {
 }
 
 class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
-  final ApiService _api = ApiService();
+  late final ApiService _api;
+  late final PdfSaveCallback _savePdf;
   List<Map<String, dynamic>> _lots = [];
   bool _loading = true;
   bool _busy = false;
@@ -24,6 +33,8 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
   @override
   void initState() {
     super.initState();
+    _api = widget.apiService ?? ApiService();
+    _savePdf = widget.savePdf ?? _savePdfToDevice;
     _load();
   }
 
@@ -190,7 +201,18 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
     }
   }
 
-  Future<void> _printLot(Map<String, dynamic> lot) async {
+  Future<String?> _savePdfToDevice({
+    required Uint8List bytes,
+    required String filename,
+  }) => FilePicker.saveFile(
+    dialogTitle: 'Salvar etiquetas em PDF',
+    fileName: filename,
+    type: FileType.custom,
+    allowedExtensions: const ['pdf'],
+    bytes: bytes,
+  );
+
+  Future<void> _saveLotPdf(Map<String, dynamic> lot) async {
     final id = lot['id']?.toString();
     if (id == null) return;
     setState(() => _busy = true);
@@ -198,13 +220,18 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
       final labels = await _api.getProvisionalLotLabels(id);
       if (labels.isEmpty) {
         throw Exception(
-          'Este lote não possui etiquetas pendentes para imprimir.',
+          'Este lote não possui etiquetas pendentes para gerar o PDF.',
         );
       }
-      await Printing.layoutPdf(
-        onLayout: (_) => _buildPdf(labels),
-        name: 'etiquetas-lote-$id.pdf',
+      final savedPath = await _savePdf(
+        bytes: await _buildPdf(labels),
+        filename: 'etiquetas-lote-$id.pdf',
       );
+      if (savedPath != null && mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('PDF salvo com sucesso.')));
+      }
     } catch (error) {
       if (mounted) _showError(error);
     } finally {
@@ -248,6 +275,12 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
 
   Future<Uint8List> _buildPdf(List<Map<String, dynamic>> labels) async {
     final document = pw.Document();
+    final regularFont = pw.Font.ttf(
+      await rootBundle.load('assets/fonts/Roboto-Regular.ttf'),
+    );
+    final mediumFont = pw.Font.ttf(
+      await rootBundle.load('assets/fonts/Roboto-Medium.ttf'),
+    );
     const perPage = 24;
     for (var start = 0; start < labels.length; start += perPage) {
       final pageLabels = labels.skip(start).take(perPage).toList();
@@ -271,6 +304,7 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
                     pw.BarcodeWidget(
                       barcode: pw.Barcode.qrCode(),
                       data: code,
+                      drawText: false,
                       width: 35,
                       height: 35,
                     ),
@@ -283,6 +317,7 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
                           pw.Text(
                             'PATRIMÔNIO PROVISÓRIO',
                             style: pw.TextStyle(
+                              font: regularFont,
                               fontSize: 5,
                               color: PdfColors.grey700,
                             ),
@@ -290,10 +325,7 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
                           pw.SizedBox(height: 3),
                           pw.Text(
                             code,
-                            style: pw.TextStyle(
-                              fontSize: 8,
-                              fontWeight: pw.FontWeight.bold,
-                            ),
+                            style: pw.TextStyle(font: mediumFont, fontSize: 8),
                           ),
                         ],
                       ),
@@ -322,10 +354,19 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
           IconButton(onPressed: _load, icon: const Icon(Icons.refresh)),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _busy ? null : _reserve,
-        icon: const Icon(Icons.add),
-        label: const Text('Reservar lote'),
+      bottomNavigationBar: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: SizedBox(
+            height: 52,
+            child: FilledButton.icon(
+              onPressed: _busy ? null : _reserve,
+              icon: const Icon(Icons.add),
+              label: const Text('Reservar lote'),
+            ),
+          ),
+        ),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -352,7 +393,7 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
           : RefreshIndicator(
               onRefresh: _load,
               child: ListView.builder(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 100),
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
                 itemCount: _lots.length,
                 itemBuilder: (context, index) {
                   final lot = _lots[index];
@@ -360,6 +401,11 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
                   final initial = lot['faixa_inicial']?.toString() ?? '';
                   final finalCode = lot['faixa_final']?.toString() ?? '';
                   final pending = lot['pendentes'] ?? 0;
+                  final pendingCount = pending is num
+                      ? pending.toInt()
+                      : int.tryParse('$pending') ?? 0;
+                  final quantityCount =
+                      int.tryParse('${lot['quantidade']}') ?? 0;
                   return Card(
                     child: Padding(
                       padding: const EdgeInsets.all(14),
@@ -372,7 +418,8 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
                           ),
                           const SizedBox(height: 6),
                           Text(
-                            '${lot['quantidade'] ?? 0} etiquetas · $pending pendentes',
+                            '$quantityCount ${quantityCount == 1 ? 'etiqueta' : 'etiquetas'} · '
+                            '$pendingCount ${pendingCount == 1 ? 'pendente' : 'pendentes'}',
                           ),
                           if (initial.isNotEmpty) Text('$initial a $finalCode'),
                           if ((lot['observacao'] ?? '').toString().isNotEmpty)
@@ -382,14 +429,13 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
                             spacing: 8,
                             children: [
                               OutlinedButton.icon(
-                                onPressed: _busy ? null : () => _printLot(lot),
-                                icon: const Icon(Icons.print_outlined),
-                                label: const Text('Imprimir pendentes'),
+                                onPressed: _busy
+                                    ? null
+                                    : () => _saveLotPdf(lot),
+                                icon: const Icon(Icons.save_alt_outlined),
+                                label: const Text('Salvar PDF A4'),
                               ),
-                              if ((pending is num
-                                      ? pending
-                                      : int.tryParse('$pending') ?? 0) >
-                                  0)
+                              if (pendingCount > 0)
                                 TextButton.icon(
                                   onPressed: _busy
                                       ? null
@@ -406,7 +452,6 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
                 },
               ),
             ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
 }

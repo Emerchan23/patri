@@ -1,11 +1,14 @@
 import { createClient, type RedisClientType } from "redis"
 
 const REDIS_URL = process.env.REDIS_URL
+const REDIS_CONNECT_TIMEOUT_MS = 1500
+const REDIS_RETRY_COOLDOWN_MS = 5000
 let hasLoggedDisabled = false
 
 type GlobalWithRedis = typeof globalThis & {
   __sispatrimonioRedisClient?: RedisClientType
-  __sispatrimonioRedisClientPromise?: Promise<RedisClientType>
+  __sispatrimonioRedisClientPromise?: Promise<RedisClientType | null>
+  __sispatrimonioRedisRetryAfter?: number
 }
 
 export async function getRedis(): Promise<RedisClientType | null> {
@@ -19,6 +22,13 @@ export async function getRedis(): Promise<RedisClientType | null> {
 
   const globalForRedis = globalThis as GlobalWithRedis
 
+  if (
+    globalForRedis.__sispatrimonioRedisRetryAfter &&
+    Date.now() < globalForRedis.__sispatrimonioRedisRetryAfter
+  ) {
+    return null
+  }
+
   if (globalForRedis.__sispatrimonioRedisClient?.isOpen) {
     return globalForRedis.__sispatrimonioRedisClient
   }
@@ -27,8 +37,12 @@ export async function getRedis(): Promise<RedisClientType | null> {
     const client: RedisClientType = createClient({
       url: REDIS_URL,
       socket: {
+        connectTimeout: REDIS_CONNECT_TIMEOUT_MS,
         reconnectStrategy(retries) {
-          const delay = Math.min(1000 * Math.max(1, retries), 5000)
+          if (retries >= 2) {
+            return new Error("Redis indisponivel apos duas tentativas; usando fallback.")
+          }
+          const delay = Math.min(250 * 2 ** retries, 1000)
           console.warn(`[REDIS] Tentando reconectar (${retries}). Proxima tentativa em ${delay}ms.`)
           return delay
         },
@@ -43,20 +57,29 @@ export async function getRedis(): Promise<RedisClientType | null> {
     client.on("ready", () => {
       console.log("[REDIS] Conexao pronta.")
     })
+    client.on("end", () => {
+      if (globalForRedis.__sispatrimonioRedisClient === client) {
+        globalForRedis.__sispatrimonioRedisClient = undefined
+        globalForRedis.__sispatrimonioRedisClientPromise = undefined
+        globalForRedis.__sispatrimonioRedisRetryAfter =
+          Date.now() + REDIS_RETRY_COOLDOWN_MS
+      }
+    })
     globalForRedis.__sispatrimonioRedisClientPromise = client
       .connect()
       .then(() => {
         console.log("[REDIS] Cliente conectado com sucesso.")
+        globalForRedis.__sispatrimonioRedisRetryAfter = undefined
         globalForRedis.__sispatrimonioRedisClient = client
         return client
       })
-      .catch((error) => {
+      .catch((error): null => {
         console.error("[REDIS] Falha ao conectar. Sistema usara fallback sem Redis.", error)
         globalForRedis.__sispatrimonioRedisClientPromise = undefined
-        try {
-          client.disconnect()
-        } catch {}
-        throw error
+        globalForRedis.__sispatrimonioRedisRetryAfter =
+          Date.now() + REDIS_RETRY_COOLDOWN_MS
+        void client.disconnect().catch(() => undefined)
+        return null
       })
   }
 

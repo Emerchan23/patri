@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sis_patrimonio_mobile/screens/settings_screen.dart';
+import 'package:sis_patrimonio_mobile/services/api_service.dart';
 import 'package:sis_patrimonio_mobile/services/settings_service.dart';
 
 void main() {
@@ -19,6 +20,28 @@ void main() {
 
     expect(find.textContaining('Não precisa de domínio'), findsOneWidget);
     expect(find.textContaining('HTTP não criptografa'), findsOneWidget);
+  });
+
+  testWidgets('explains what to check when server connection fails', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(home: SettingsScreen(apiService: _OfflineApiService())),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Testar'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.textContaining('Confira o IP e a porta, a conexão à rede/VPN'),
+      findsOneWidget,
+    );
+    expect(
+      await SettingsService().getServerUrl(),
+      'http://10.0.2.2:3005',
+      reason: 'uma falha ao testar não deve trocar o endereço salvo',
+    );
   });
 
   for (final address in [
@@ -46,4 +69,9 @@ void main() {
       expect(await SettingsService().getServerUrl(), 'http://$address');
     });
   }
+}
+
+class _OfflineApiService extends ApiService {
+  @override
+  Future<bool> testConnection() async => false;
 }

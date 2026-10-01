@@ -20,6 +20,7 @@ class _VehiclesScreenState extends State<VehiclesScreen> {
   String? _error;
   String _statusFilter = 'todos';
   String? _deletingVehicleId;
+  String? _updatingVehicleId;
 
   @override
   void initState() {
@@ -96,6 +97,200 @@ class _VehiclesScreenState extends State<VehiclesScreen> {
       if (mounted) setState(() => _deletingVehicleId = null);
     }
   }
+
+  Future<void> _editVehicle(Map<String, dynamic> vehicle) async {
+    final id = vehicle['id']?.toString();
+    if (id == null || id.isEmpty) return;
+    final values = <String, dynamic>{
+      'descricao': vehicle['descricao']?.toString() ?? '',
+      'placa': vehicle['placa']?.toString() ?? '',
+      'marca': vehicle['marca']?.toString() ?? '',
+      'modelo': vehicle['modelo']?.toString() ?? '',
+      'ano': vehicle['ano']?.toString() ?? '',
+      'kmAtual': vehicle['kmAtual']?.toString() ?? '',
+      'status': vehicle['status']?.toString() ?? 'ativo',
+      'observacoes': vehicle['observacoes']?.toString() ?? '',
+    };
+    const statuses = [
+      'ativo',
+      'em_manutencao',
+      'baixado',
+      'emprestado',
+      'transferido',
+    ];
+    final formKey = GlobalKey<FormState>();
+    final updated = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          scrollable: true,
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 16,
+            vertical: 24,
+          ),
+          title: const Text('Editar veículo'),
+          content: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  key: const ValueKey('vehicle-edit-description'),
+                  initialValue: values['descricao'] as String,
+                  decoration: const InputDecoration(labelText: 'Descrição'),
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Informe a descrição.'
+                      : null,
+                  onChanged: (value) => values['descricao'] = value.trim(),
+                ),
+                TextFormField(
+                  key: const ValueKey('vehicle-edit-plate'),
+                  initialValue: values['placa'] as String,
+                  textCapitalization: TextCapitalization.characters,
+                  decoration: const InputDecoration(labelText: 'Placa'),
+                  onChanged: (value) =>
+                      values['placa'] = value.trim().toUpperCase(),
+                ),
+                TextFormField(
+                  key: const ValueKey('vehicle-edit-brand'),
+                  initialValue: values['marca'] as String,
+                  decoration: const InputDecoration(labelText: 'Marca'),
+                  onChanged: (value) => values['marca'] = value.trim(),
+                ),
+                TextFormField(
+                  key: const ValueKey('vehicle-edit-model'),
+                  initialValue: values['modelo'] as String,
+                  decoration: const InputDecoration(labelText: 'Modelo'),
+                  onChanged: (value) => values['modelo'] = value.trim(),
+                ),
+                TextFormField(
+                  key: const ValueKey('vehicle-edit-year'),
+                  initialValue: values['ano'] as String,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Ano'),
+                  validator: (value) {
+                    final text = value?.trim() ?? '';
+                    if (text.isEmpty) return null;
+                    final year = int.tryParse(text);
+                    return year == null ||
+                            year < 1900 ||
+                            year > DateTime.now().year + 1
+                        ? 'Informe um ano válido.'
+                        : null;
+                  },
+                  onChanged: (value) => values['ano'] = value.trim(),
+                ),
+                TextFormField(
+                  key: const ValueKey('vehicle-edit-mileage'),
+                  initialValue: values['kmAtual'] as String,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Quilometragem (km)',
+                  ),
+                  validator: (value) {
+                    final text = value?.trim() ?? '';
+                    if (text.isEmpty) return null;
+                    final km = int.tryParse(text);
+                    return km == null || km < 0
+                        ? 'Informe quilômetros válidos.'
+                        : null;
+                  },
+                  onChanged: (value) => values['kmAtual'] = value.trim(),
+                ),
+                DropdownButtonFormField<String>(
+                  key: const ValueKey('vehicle-edit-status'),
+                  isExpanded: true,
+                  initialValue: statuses.contains(values['status'])
+                      ? values['status'] as String
+                      : 'ativo',
+                  decoration: const InputDecoration(labelText: 'Status'),
+                  items: statuses
+                      .map(
+                        (status) => DropdownMenuItem(
+                          value: status,
+                          child: Text(_statusLabel(status)),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    if (value != null) {
+                      setDialogState(() => values['status'] = value);
+                    }
+                  },
+                ),
+                TextFormField(
+                  key: const ValueKey('vehicle-edit-notes'),
+                  initialValue: values['observacoes'] as String,
+                  maxLines: 3,
+                  decoration: const InputDecoration(labelText: 'Observações'),
+                  onChanged: (value) => values['observacoes'] = value.trim(),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () {
+                if (formKey.currentState?.validate() != true) return;
+                Navigator.pop(dialogContext, {
+                  'descricao': values['descricao'],
+                  'placa': (values['placa'] as String).isEmpty
+                      ? null
+                      : values['placa'],
+                  'marca': (values['marca'] as String).isEmpty
+                      ? null
+                      : values['marca'],
+                  'modelo': (values['modelo'] as String).isEmpty
+                      ? null
+                      : values['modelo'],
+                  'ano': int.tryParse(values['ano'] as String),
+                  'kmAtual': int.tryParse(values['kmAtual'] as String),
+                  'status': values['status'],
+                  'observacoes': (values['observacoes'] as String).isEmpty
+                      ? null
+                      : values['observacoes'],
+                });
+              },
+              child: const Text('Salvar'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (updated == null || !mounted) return;
+
+    setState(() => _updatingVehicleId = id);
+    try {
+      await _api.updateVehicle(id, data: updated);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Veículo atualizado.')));
+      await _load();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(error.toString().replaceFirst('Exception: ', '')),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _updatingVehicleId = null);
+    }
+  }
+
+  static String _statusLabel(String status) => switch (status) {
+    'em_manutencao' => 'Em manutenção',
+    'baixado' => 'Baixado',
+    'emprestado' => 'Emprestado',
+    'transferido' => 'Transferido',
+    _ => 'Ativo',
+  };
 
   Future<void> _load() async {
     setState(() {
@@ -300,46 +495,85 @@ class _VehiclesScreenState extends State<VehiclesScreen> {
                       ],
                     ),
                   ),
-                  if (vehicle['placa']?.toString().isNotEmpty == true)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 9,
-                        vertical: 5,
-                      ),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey.shade400),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        vehicle['placa'].toString(),
-                        style: const TextStyle(fontWeight: FontWeight.w700),
-                      ),
-                    ),
-                  FutureBuilder<CurrentUserSession?>(
-                    future: _sessionFuture,
-                    builder: (context, snapshot) {
-                      if (snapshot.data?.hasPermission('excluirBem') != true) {
-                        return const SizedBox.shrink();
-                      }
-                      final id = vehicle['id']?.toString();
-                      return IconButton(
-                        tooltip: 'Excluir veículo',
-                        onPressed: id == _deletingVehicleId
-                            ? null
-                            : () => _deleteVehicle(vehicle),
-                        icon: id == _deletingVehicleId
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.delete_outline),
-                      );
-                    },
-                  ),
                 ],
+              ),
+              if (vehicle['placa']?.toString().isNotEmpty == true) ...[
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 9,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey.shade400),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      vehicle['placa'].toString(),
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ),
+              ],
+              Align(
+                alignment: Alignment.centerRight,
+                child: Wrap(
+                  spacing: 4,
+                  children: [
+                    FutureBuilder<CurrentUserSession?>(
+                      future: _sessionFuture,
+                      builder: (context, snapshot) {
+                        if (snapshot.data?.hasPermission('gerenciarVeiculos') !=
+                            true) {
+                          return const SizedBox.shrink();
+                        }
+                        final id = vehicle['id']?.toString();
+                        return IconButton(
+                          tooltip: 'Editar veículo',
+                          onPressed: id == _updatingVehicleId || id == null
+                              ? null
+                              : () => _editVehicle(vehicle),
+                          icon: id == _updatingVehicleId
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.edit_outlined),
+                        );
+                      },
+                    ),
+                    FutureBuilder<CurrentUserSession?>(
+                      future: _sessionFuture,
+                      builder: (context, snapshot) {
+                        if (snapshot.data?.hasPermission('excluirBem') !=
+                            true) {
+                          return const SizedBox.shrink();
+                        }
+                        final id = vehicle['id']?.toString();
+                        return IconButton(
+                          tooltip: 'Excluir veículo',
+                          onPressed: id == _deletingVehicleId
+                              ? null
+                              : () => _deleteVehicle(vehicle),
+                          icon: id == _deletingVehicleId
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.delete_outline),
+                        );
+                      },
+                    ),
+                  ],
+                ),
               ),
               const Divider(height: 24),
               Wrap(

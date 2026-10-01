@@ -5,58 +5,91 @@ import 'package:sis_patrimonio_mobile/services/api_service.dart';
 import 'package:sis_patrimonio_mobile/widgets/searchable_dropdown.dart';
 
 void main() {
-  testWidgets(
-    'falha de rede no cadastro informa o erro e libera nova tentativa',
-    (tester) async {
-      tester.view.physicalSize = const Size(360, 800);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
+  testWidgets('cadastro de veículo solicita dados da frota no passo final', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
 
-      final api = _CreateAssetApiFake();
-      await tester.pumpWidget(
-        MaterialApp(home: CreateAssetScreen(apiService: api)),
-      );
-      await tester.pumpAndSettle();
+    await _reachFinalStep(
+      tester,
+      _CreateAssetApiFake(),
+      categoryLabel: 'Veículo',
+    );
 
-      await tester.enterText(
-        find.widgetWithText(TextFormField, 'Descrição'),
-        'Notebook de teste',
-      );
-      await _choose<String>(tester, 'Categoria', 'Informática');
-      await tester.ensureVisible(find.text('Continuar'));
-      await tester.tap(find.text('Continuar'));
-      await tester.pumpAndSettle();
-      expect(find.text('Etapa 2 de 3 · Local e responsável'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('vehicle-registration-plate')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('vehicle-registration-year')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('vehicle-registration-mileage')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
 
-      await _choose<int>(tester, 'Secretaria', 'Secretaria de teste');
-      await _choose<int>(tester, 'Departamento', 'Departamento de teste');
-      await _choose<int>(tester, 'Sala', 'Sala de teste');
-      await tester.enterText(
-        find.widgetWithText(TextFormField, 'Nome do Responsável (Manual)'),
-        'Responsável de teste',
-      );
-      await tester.ensureVisible(find.text('Continuar'));
-      await tester.tap(find.text('Continuar'));
-      await tester.pumpAndSettle();
-      expect(find.text('Etapa 3 de 3 · Complementos'), findsOneWidget);
+  testWidgets('cadastro sem foto orienta e nao envia para a API', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
 
-      await tester.ensureVisible(find.text('Cadastrar bem'));
-      await tester.tap(find.text('Cadastrar bem'));
-      await tester.pumpAndSettle();
+    final api = _CreateAssetApiFake();
+    await _reachFinalStep(tester, api);
 
-      expect(api.attempts, 1);
-      expect(
-        find.text('Erro ao cadastrar bem: conexão de teste'),
-        findsOneWidget,
-      );
-      final submit = tester.widget<ElevatedButton>(
-        find.widgetWithText(ElevatedButton, 'Cadastrar bem'),
-      );
-      expect(submit.onPressed, isNotNull);
-      expect(tester.takeException(), isNull);
-    },
+    await tester.ensureVisible(find.text('Cadastrar bem'));
+    await tester.tap(find.text('Cadastrar bem'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Foto do bem *'), findsOneWidget);
+    expect(
+      find.text('Adicione uma foto do bem para continuar.'),
+      findsOneWidget,
+    );
+    expect(api.attempts, 0);
+    expect(tester.takeException(), isNull);
+  });
+}
+
+Future<void> _reachFinalStep(
+  WidgetTester tester,
+  _CreateAssetApiFake api, {
+  String categoryLabel = 'Informática',
+}) async {
+  await tester.pumpWidget(
+    MaterialApp(home: CreateAssetScreen(apiService: api)),
   );
+  await tester.pumpAndSettle();
+
+  await tester.enterText(
+    find.widgetWithText(TextFormField, 'Descrição'),
+    'Notebook de teste',
+  );
+  await _choose<String>(tester, 'Categoria', categoryLabel);
+  await tester.ensureVisible(find.text('Continuar'));
+  await tester.tap(find.text('Continuar'));
+  await tester.pumpAndSettle();
+  expect(find.text('Etapa 2 de 3 · Local e responsável'), findsOneWidget);
+
+  await _choose<int>(tester, 'Secretaria', 'Secretaria de teste');
+  await _choose<int>(tester, 'Departamento', 'Departamento de teste');
+  await _choose<int>(tester, 'Sala', 'Sala de teste');
+  await tester.enterText(
+    find.widgetWithText(TextFormField, 'Nome do Responsável (Manual)'),
+    'Responsável de teste',
+  );
+  await tester.ensureVisible(find.text('Continuar'));
+  await tester.tap(find.text('Continuar'));
+  await tester.pumpAndSettle();
+  expect(find.text('Etapa 3 de 3 · Complementos'), findsOneWidget);
 }
 
 Future<void> _choose<T>(WidgetTester tester, String label, String value) async {
@@ -85,6 +118,7 @@ class _CreateAssetApiFake extends ApiService {
     bool forceRefresh = false,
   }) async => [
     {'slug': 'informatica', 'nome': 'Informática'},
+    {'slug': 'veiculo', 'nome': 'Veículo'},
   ];
 
   @override

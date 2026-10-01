@@ -1078,6 +1078,28 @@ class ApiService {
     return _normalizeListResponse(_decodeResponseBody(response));
   }
 
+  Future<void> updateVehicle(
+    String id, {
+    required Map<String, dynamic> data,
+  }) async {
+    final baseUrl = await _getBaseUrl();
+    final response = await http
+        .put(
+          Uri.parse('$baseUrl/api/veiculos/$id'),
+          headers: await _getHeaders(),
+          body: json.encode(data),
+        )
+        .timeout(const Duration(seconds: 15));
+    if (response.statusCode != 200) {
+      throw Exception(
+        _parseErrorMessage(
+          response,
+          fallback: 'Não foi possível atualizar o veículo.',
+        ),
+      );
+    }
+  }
+
   Future<void> deleteVehicle(String id, {required String reason}) async {
     final baseUrl = await _getBaseUrl();
     final response = await http

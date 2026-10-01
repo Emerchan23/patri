@@ -5,8 +5,9 @@ import 'package:sis_patrimonio_mobile/screens/welcome_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   final bool showLogout;
+  final ApiService? apiService;
 
-  const SettingsScreen({super.key, this.showLogout = true});
+  const SettingsScreen({super.key, this.showLogout = true, this.apiService});
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -15,7 +16,7 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController _urlController = TextEditingController();
   final SettingsService _settingsService = SettingsService();
-  final ApiService _apiService = ApiService();
+  late final ApiService _apiService = widget.apiService ?? ApiService();
   bool _isTesting = false;
 
   @override
@@ -158,7 +159,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           content: Text(
             success
                 ? 'Conexão bem-sucedida!'
-                : 'Falha na conexão. Verifique a URL.',
+                : 'Não foi possível alcançar o servidor. Confira o IP e a porta, a conexão à rede/VPN e se o serviço do SIS Patrimônio está ativo.',
           ),
           backgroundColor: success ? Colors.green : Colors.red,
         ),
