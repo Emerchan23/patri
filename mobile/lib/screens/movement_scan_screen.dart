@@ -12,8 +12,19 @@ import 'package:sis_patrimonio_mobile/widgets/scanner_camera_error.dart';
 
 class MovementScanScreen extends StatefulWidget {
   final Map<String, String?>? initialDestination;
+  final ApiService? apiService;
+  final Widget Function(ValueChanged<String> onCode)? scannerPreviewBuilder;
+  final Future<void> Function()? pauseCamera;
+  final Future<void> Function()? resumeCamera;
 
-  const MovementScanScreen({super.key, this.initialDestination});
+  const MovementScanScreen({
+    super.key,
+    this.initialDestination,
+    this.apiService,
+    this.scannerPreviewBuilder,
+    this.pauseCamera,
+    this.resumeCamera,
+  });
 
   @override
   State<MovementScanScreen> createState() => _MovementScanScreenState();
@@ -23,7 +34,7 @@ class _MovementScanScreenState extends State<MovementScanScreen> {
   final MobileScannerController _camera = MobileScannerController(
     formats: const [BarcodeFormat.all],
   );
-  final ApiService _api = ApiService();
+  late final ApiService _api = widget.apiService ?? ApiService();
   final Map<String, Asset> _assets = {};
   bool _resolvingCode = false;
   bool _cameraReady = false;
@@ -60,10 +71,28 @@ class _MovementScanScreenState extends State<MovementScanScreen> {
     });
   }
 
+  Future<void> _pauseCamera() async {
+    final pause = widget.pauseCamera;
+    if (pause != null) {
+      await pause();
+    } else {
+      await _camera.stop();
+    }
+  }
+
+  Future<void> _resumeCamera() async {
+    final resume = widget.resumeCamera;
+    if (resume != null) {
+      await resume();
+    } else {
+      await _camera.start();
+    }
+  }
+
   Future<void> _retryScanner() async {
     if (mounted) setState(() => _cameraFailed = false);
     try {
-      await _camera.start();
+      await _resumeCamera();
     } catch (_) {
       _markCameraFailed();
     }
@@ -75,7 +104,11 @@ class _MovementScanScreenState extends State<MovementScanScreen> {
 
     setState(() => _resolvingCode = true);
     try {
-      await _camera.stop();
+      try {
+        await _pauseCamera();
+      } catch (_) {
+        // A camera-control failure must not prevent a manual or decoded lookup.
+      }
 
       if (code.toUpperCase().startsWith('SALA:')) {
         _showMessage('Este QR identifica uma sala. Leia o código de um bem.');
@@ -99,7 +132,7 @@ class _MovementScanScreenState extends State<MovementScanScreen> {
         _showMessage('Este bem já está no destino selecionado.');
       } else {
         setState(() => _assets[asset.id] = asset);
-        await HapticFeedback.selectionClick();
+        unawaited(HapticFeedback.selectionClick().catchError((_) {}));
         _showMessage('Bem adicionado. Pode escanear o próximo.');
       }
     } catch (error) {
@@ -111,7 +144,7 @@ class _MovementScanScreenState extends State<MovementScanScreen> {
       if (mounted) {
         setState(() => _resolvingCode = false);
         try {
-          await _camera.start();
+          await _resumeCamera();
         } catch (_) {
           _markCameraFailed();
         }
@@ -156,7 +189,7 @@ class _MovementScanScreenState extends State<MovementScanScreen> {
     if (_assets.isEmpty) return;
 
     try {
-      await _camera.stop();
+      await _pauseCamera();
     } catch (_) {
       // Continue to the destination form even if the camera was already paused.
     }
@@ -184,7 +217,7 @@ class _MovementScanScreenState extends State<MovementScanScreen> {
     }
 
     try {
-      await _camera.start();
+      await _resumeCamera();
     } catch (_) {
       _markCameraFailed();
     }
@@ -195,6 +228,49 @@ class _MovementScanScreenState extends State<MovementScanScreen> {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Widget _buildScannerPreview() {
+    final previewBuilder = widget.scannerPreviewBuilder;
+    if (previewBuilder != null) return previewBuilder(_resolveCode);
+
+    return MobileScanner(
+      controller: _camera,
+      errorBuilder: (context, error, child) {
+        _markCameraFailed();
+        final message = switch (error.errorCode) {
+          MobileScannerErrorCode.permissionDenied =>
+            'Permita o acesso à câmera nas configurações do aparelho ou digite o patrimônio.',
+          MobileScannerErrorCode.unsupported =>
+            'Este aparelho não oferece leitura por câmera. Digite o patrimônio para continuar.',
+          _ =>
+            'Não foi possível iniciar a câmera. Você pode digitar o patrimônio.',
+        };
+        return ScannerCameraError(
+          onRetry: _retryScanner,
+          onManualEntry: _enterCodeManually,
+          message: message,
+        );
+      },
+      onDetect: (capture) {
+        if (_resolvingCode) return;
+        final code = capture.barcodes
+            .map((barcode) => barcode.rawValue)
+            .whereType<String>()
+            .firstOrNull;
+        if (code != null) _resolveCode(code);
+      },
+      onScannerStarted: (_) {
+        _cameraStartupTimer?.cancel();
+        if (mounted) {
+          setState(() {
+            _cameraFailed = false;
+            _cameraReady = true;
+            _cameraStartupTimedOut = false;
+          });
+        }
+      },
+    );
   }
 
   @override
@@ -229,43 +305,7 @@ class _MovementScanScreenState extends State<MovementScanScreen> {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  MobileScanner(
-                    controller: _camera,
-                    errorBuilder: (context, error, child) {
-                      _markCameraFailed();
-                      final message = switch (error.errorCode) {
-                        MobileScannerErrorCode.permissionDenied =>
-                          'Permita o acesso à câmera nas configurações do aparelho ou digite o patrimônio.',
-                        MobileScannerErrorCode.unsupported =>
-                          'Este aparelho não oferece leitura por câmera. Digite o patrimônio para continuar.',
-                        _ =>
-                          'Não foi possível iniciar a câmera. Você pode digitar o patrimônio.',
-                      };
-                      return ScannerCameraError(
-                        onRetry: _retryScanner,
-                        onManualEntry: _enterCodeManually,
-                        message: message,
-                      );
-                    },
-                    onDetect: (capture) {
-                      if (_resolvingCode) return;
-                      final code = capture.barcodes
-                          .map((barcode) => barcode.rawValue)
-                          .whereType<String>()
-                          .firstOrNull;
-                      if (code != null) _resolveCode(code);
-                    },
-                    onScannerStarted: (_) {
-                      _cameraStartupTimer?.cancel();
-                      if (mounted) {
-                        setState(() {
-                          _cameraFailed = false;
-                          _cameraReady = true;
-                          _cameraStartupTimedOut = false;
-                        });
-                      }
-                    },
-                  ),
+                  _buildScannerPreview(),
                   if (!_cameraFailed)
                     IgnorePointer(
                       child: Center(

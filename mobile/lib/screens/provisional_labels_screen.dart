@@ -6,20 +6,6 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:sis_patrimonio_mobile/services/api_service.dart';
 
-const _defaultLabelLayout = <String, dynamic>{
-  'title': '',
-  'subtitle': '',
-  'showDescription': true,
-  'showEmenda': true,
-  'showFooter': true,
-  'qrSizeMm': 16,
-  'offsetXMm': 0,
-  'offsetYMm': 1,
-  'offsetColuna2Mm': 3,
-  'alturaExtraMm': 20,
-  'innerPaddingMm': 1.5,
-};
-
 class ProvisionalLabelsScreen extends StatefulWidget {
   const ProvisionalLabelsScreen({super.key});
 
@@ -207,11 +193,6 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
   Future<void> _printLot(Map<String, dynamic> lot) async {
     final id = lot['id']?.toString();
     if (id == null) return;
-    final printOptions = await showDialog<LabelPrintOptions>(
-      context: context,
-      builder: (context) => const LabelPrintDialog(),
-    );
-    if (printOptions == null) return;
     setState(() => _busy = true);
     try {
       final labels = await _api.getProvisionalLotLabels(id);
@@ -220,29 +201,9 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
           'Este lote não possui etiquetas pendentes para imprimir.',
         );
       }
-      var layout = _defaultLabelLayout;
-      if (printOptions.zebra) {
-        try {
-          layout = await _api.getProvisionalLabelLayoutConfig();
-        } catch (_) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text(
-                  'Preset do sistema indisponível; usando o padrão do aplicativo.',
-                ),
-              ),
-            );
-          }
-        }
-      }
       await Printing.layoutPdf(
-        onLayout: (_) => printOptions.zebra
-            ? _buildZebraPdf(labels, printOptions.columns, layout)
-            : _buildPdf(labels),
-        name: printOptions.zebra
-            ? 'etiquetas-zebra-lote-$id.pdf'
-            : 'etiquetas-lote-$id.pdf',
+        onLayout: (_) => _buildPdf(labels),
+        name: 'etiquetas-lote-$id.pdf',
       );
     } catch (error) {
       if (mounted) _showError(error);
@@ -348,145 +309,6 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
     return document.save();
   }
 
-  Future<Uint8List> _buildZebraPdf(
-    List<Map<String, dynamic>> labels,
-    int columns,
-    Map<String, dynamic> layout,
-  ) async {
-    final document = pw.Document();
-    const labelWidthMm = 50.0;
-    final labelHeightMm = 25 + _layoutNumber(layout, 'alturaExtraMm', 20);
-    final qrSizeMm = _layoutNumber(layout, 'qrSizeMm', 16).clamp(8, 22);
-    final innerPaddingMm = _layoutNumber(layout, 'innerPaddingMm', 1.5);
-    final title = layout['title']?.toString().trim() ?? '';
-    final subtitle = layout['subtitle']?.toString().trim() ?? '';
-    final showDescription = layout['showDescription'] != false;
-    final showAmendment = layout['showEmenda'] != false;
-    final showFooter = layout['showFooter'] != false;
-    final horizontalOffset = _layoutNumber(layout, 'offsetXMm', 0);
-    final verticalOffset = _layoutNumber(layout, 'offsetYMm', 1);
-    final secondColumnOffset = _layoutNumber(layout, 'offsetColuna2Mm', 3);
-    final pageFormat = PdfPageFormat(
-      labelWidthMm * columns * PdfPageFormat.mm,
-      labelHeightMm * PdfPageFormat.mm,
-      marginAll: 0,
-    );
-
-    for (var start = 0; start < labels.length; start += columns) {
-      final row = labels.skip(start).take(columns).toList();
-      document.addPage(
-        pw.Page(
-          pageFormat: pageFormat,
-          margin: pw.EdgeInsets.zero,
-          build: (context) => pw.Row(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: row.indexed.map((entry) {
-              final index = entry.$1;
-              final label = entry.$2;
-              final code = label['codigo']?.toString() ?? '';
-              final observation = label['observacao']?.toString().trim();
-              final amendment = label['emenda_parlamentar']?.toString().trim();
-              final columnOffset =
-                  horizontalOffset +
-                  (columns == 2 && index == 1 ? secondColumnOffset : 0);
-              return pw.SizedBox(
-                width: labelWidthMm * PdfPageFormat.mm,
-                height: labelHeightMm * PdfPageFormat.mm,
-                child: pw.Padding(
-                  padding: pw.EdgeInsets.only(
-                    left: (columnOffset + innerPaddingMm) * PdfPageFormat.mm,
-                    right: innerPaddingMm * PdfPageFormat.mm,
-                    top: (verticalOffset + innerPaddingMm) * PdfPageFormat.mm,
-                    bottom: innerPaddingMm * PdfPageFormat.mm,
-                  ),
-                  child: pw.Row(
-                    crossAxisAlignment: pw.CrossAxisAlignment.center,
-                    children: [
-                      pw.BarcodeWidget(
-                        barcode: pw.Barcode.qrCode(),
-                        data: code,
-                        width: qrSizeMm * PdfPageFormat.mm,
-                        height: qrSizeMm * PdfPageFormat.mm,
-                      ),
-                      pw.SizedBox(width: 2 * PdfPageFormat.mm),
-                      pw.Expanded(
-                        child: pw.Column(
-                          mainAxisAlignment: pw.MainAxisAlignment.center,
-                          crossAxisAlignment: pw.CrossAxisAlignment.start,
-                          children: [
-                            if (title.isNotEmpty)
-                              pw.Text(
-                                title,
-                                maxLines: 1,
-                                style: pw.TextStyle(
-                                  fontSize: 5,
-                                  color: PdfColors.grey700,
-                                ),
-                              ),
-                            if (subtitle.isNotEmpty)
-                              pw.Text(
-                                subtitle,
-                                maxLines: 1,
-                                style: const pw.TextStyle(fontSize: 4.4),
-                              ),
-                            pw.SizedBox(height: 1.5),
-                            pw.Text(
-                              code,
-                              maxLines: 1,
-                              style: pw.TextStyle(
-                                fontSize: 7,
-                                fontWeight: pw.FontWeight.bold,
-                              ),
-                            ),
-                            if (showDescription &&
-                                observation?.isNotEmpty == true) ...[
-                              pw.SizedBox(height: 2),
-                              pw.Text(
-                                observation!,
-                                maxLines: 2,
-                                style: const pw.TextStyle(fontSize: 5.5),
-                              ),
-                            ],
-                            if (showAmendment &&
-                                amendment?.isNotEmpty == true) ...[
-                              pw.SizedBox(height: 2),
-                              pw.Text(
-                                amendment!,
-                                maxLines: 2,
-                                style: const pw.TextStyle(fontSize: 5),
-                              ),
-                            ],
-                            if (showFooter)
-                              pw.Align(
-                                alignment: pw.Alignment.centerRight,
-                                child: pw.Text(
-                                  'SisPatrimonio',
-                                  style: pw.TextStyle(fontSize: 4),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            }).toList(),
-          ),
-        ),
-      );
-    }
-    return document.save();
-  }
-
-  double _layoutNumber(
-    Map<String, dynamic> layout,
-    String key,
-    double fallback,
-  ) {
-    return double.tryParse(layout[key]?.toString() ?? '') ?? fallback;
-  }
-
   void _showError(Object error) => ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))),
   );
@@ -587,97 +409,4 @@ class _ProvisionalLabelsScreenState extends State<ProvisionalLabelsScreen> {
       floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
-}
-
-class LabelPrintOptions {
-  final bool zebra;
-  final int columns;
-  final Map<String, dynamic> layout;
-
-  const LabelPrintOptions({
-    required this.zebra,
-    required this.columns,
-    required this.layout,
-  });
-}
-
-class LabelPrintDialog extends StatefulWidget {
-  final Map<String, dynamic> layout;
-
-  const LabelPrintDialog({super.key, this.layout = _defaultLabelLayout});
-
-  @override
-  State<LabelPrintDialog> createState() => _LabelPrintDialogState();
-}
-
-class _LabelPrintDialogState extends State<LabelPrintDialog> {
-  bool _zebra = false;
-  int _columns = 1;
-
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Formato de impressão'),
-    content: Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        RadioGroup<bool>(
-          groupValue: _zebra,
-          onChanged: (value) => setState(() => _zebra = value ?? false),
-          child: const Column(
-            children: [
-              RadioListTile<bool>(
-                value: false,
-                title: Text('Folha A4'),
-                subtitle: Text('Grade de 3 colunas para impressora comum.'),
-                contentPadding: EdgeInsets.zero,
-              ),
-              RadioListTile<bool>(
-                value: true,
-                title: Text('Etiqueta térmica (Zebra)'),
-                subtitle: Text('Rolo de 50 mm, uma etiqueta por linha.'),
-                contentPadding: EdgeInsets.zero,
-              ),
-            ],
-          ),
-        ),
-        if (_zebra) ...[
-          const SizedBox(height: 8),
-          const Text('Largura do rolo'),
-          const SizedBox(height: 4),
-          SegmentedButton<int>(
-            segments: const [
-              ButtonSegment(value: 1, label: Text('50 mm')),
-              ButtonSegment(value: 2, label: Text('100 mm · 2 colunas')),
-            ],
-            selected: {_columns},
-            onSelectionChanged: (values) =>
-                setState(() => _columns = values.first),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'O tamanho final também depende da configuração da impressora. Faça um teste em papel antes de usar etiquetas adesivas.',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-        ],
-      ],
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('Cancelar'),
-      ),
-      FilledButton(
-        onPressed: () => Navigator.pop(
-          context,
-          LabelPrintOptions(
-            zebra: _zebra,
-            columns: _columns,
-            layout: widget.layout,
-          ),
-        ),
-        child: const Text('Continuar'),
-      ),
-    ],
-  );
 }

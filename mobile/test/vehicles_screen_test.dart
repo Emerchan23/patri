@@ -30,6 +30,28 @@ void main() {
     expect(find.text('SEDAN DE SERVIÇO MUNICIPAL'), findsOneWidget);
     expect(find.text('ABC1D23'), findsOneWidget);
     expect(find.text('Quilometragem'), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('vehicle-search')),
+      'XYZ9K87',
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('PICKUP DE MANUTENÇÃO'), findsOneWidget);
+    expect(find.text('SEDAN DE SERVIÇO MUNICIPAL'), findsNothing);
+
+    await tester.tap(find.byTooltip('Limpar busca'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('vehicle-status-em_manutencao')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('PICKUP DE MANUTENÇÃO'), findsOneWidget);
+    expect(find.text('SEDAN DE SERVIÇO MUNICIPAL'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('vehicle-status-ativo')));
+    await tester.pumpAndSettle();
+    expect(find.text('SEDAN DE SERVIÇO MUNICIPAL'), findsOneWidget);
+    expect(find.text('PICKUP DE MANUTENÇÃO'), findsNothing);
     await tester.scrollUntilVisible(
       find.text('Secretaria de Saúde / Departamento de Transporte / Garagem'),
       220,
@@ -41,9 +63,59 @@ void main() {
     );
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('exclusão de veículo exige motivo e registra a confirmação', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final api = _VehiclesApiFake(
+      session: const CurrentUserSession(
+        nome: 'Gestor de teste',
+        role: 'gestor',
+      ),
+    );
+    await tester.pumpWidget(MaterialApp(home: VehiclesScreen(apiService: api)));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Excluir veículo').first);
+    await tester.pumpAndSettle();
+    expect(find.text('Excluir veículo?'), findsOneWidget);
+    expect(api.deletedVehicleId, isNull);
+    final confirm = tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, 'Excluir veículo'),
+    );
+    expect(confirm.onPressed, isNull);
+
+    await tester.enterText(find.byType(TextField).last, 'Veículo substituído');
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Excluir veículo'));
+    await tester.pumpAndSettle();
+
+    expect(api.deletedVehicleId, 'vehicle-1');
+    expect(api.deleteReason, 'Veículo substituído');
+    expect(find.text('SEDAN DE SERVIÇO MUNICIPAL'), findsNothing);
+    expect(find.text('PICKUP DE MANUTENÇÃO'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }
 
 class _VehiclesApiFake extends ApiService {
+  final CurrentUserSession? session;
+  final Set<String> _deletedIds = {};
+  String? deletedVehicleId;
+  String? deleteReason;
+
+  _VehiclesApiFake({
+    this.session = const CurrentUserSession(
+      nome: 'Assistente de teste',
+      role: 'assistente',
+    ),
+  });
+
   @override
   Future<List<Map<String, dynamic>>> getVehicles() async => [
     {
@@ -62,5 +134,31 @@ class _VehiclesApiFake extends ApiService {
         'sala': 'Garagem',
       },
     },
-  ];
+    {
+      'id': 'vehicle-2',
+      'descricao': 'PICKUP DE MANUTENÇÃO',
+      'patrimonio': 'PAT-VEIC-02',
+      'placa': 'XYZ9K87',
+      'marca': 'Outra marca',
+      'modelo': 'Pickup',
+      'ano': 2022,
+      'kmAtual': 93000,
+      'status': 'em_manutencao',
+      'localizacao': {
+        'secretaria': 'Secretaria de Obras',
+        'departamento': 'Oficina',
+        'sala': 'Garagem',
+      },
+    },
+  ].where((vehicle) => !_deletedIds.contains(vehicle['id'])).toList();
+
+  @override
+  Future<CurrentUserSession?> getCurrentUserSession() async => session;
+
+  @override
+  Future<void> deleteVehicle(String id, {required String reason}) async {
+    deletedVehicleId = id;
+    deleteReason = reason;
+    _deletedIds.add(id);
+  }
 }

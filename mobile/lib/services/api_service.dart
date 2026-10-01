@@ -1078,6 +1078,25 @@ class ApiService {
     return _normalizeListResponse(_decodeResponseBody(response));
   }
 
+  Future<void> deleteVehicle(String id, {required String reason}) async {
+    final baseUrl = await _getBaseUrl();
+    final response = await http
+        .delete(
+          Uri.parse('$baseUrl/api/veiculos/$id'),
+          headers: await _getHeaders(),
+          body: json.encode({'motivo': reason}),
+        )
+        .timeout(const Duration(seconds: 15));
+    if (response.statusCode != 200) {
+      throw Exception(
+        _parseErrorMessage(
+          response,
+          fallback: 'Não foi possível excluir o veículo.',
+        ),
+      );
+    }
+  }
+
   Future<List<Map<String, dynamic>>> getNotifications() async {
     final baseUrl = await _getBaseUrl();
     final response = await http
@@ -1172,29 +1191,6 @@ class ApiService {
       );
     }
     return _normalizeListResponse(_decodeResponseBody(response));
-  }
-
-  Future<Map<String, dynamic>> getProvisionalLabelLayoutConfig() async {
-    final baseUrl = await _getBaseUrl();
-    final response = await http
-        .get(
-          Uri.parse('$baseUrl/api/mobile/etiquetas/configuracao'),
-          headers: await _getHeaders(),
-        )
-        .timeout(const Duration(seconds: 20));
-    if (response.statusCode != 200) {
-      throw Exception(
-        _parseErrorMessage(
-          response,
-          fallback: 'Não foi possível carregar o preset de impressão.',
-        ),
-      );
-    }
-    final decoded = _decodeResponseBody(response);
-    if (decoded is Map && decoded['data'] is Map) {
-      return Map<String, dynamic>.from(decoded['data'] as Map);
-    }
-    throw Exception('Resposta inválida ao carregar o preset de impressão.');
   }
 
   Future<List<Map<String, dynamic>>> getProvisionalLotLabels(
